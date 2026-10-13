@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: implement the docker worker backend — `create` dedups on the task label and mints a per-worker token, `list` reads the daemon on every call, and `stop` removes only a container carrying the controller label
+
 ## v0.2.0
 
 - feat: serve the control API over A2A — a JSON-RPC binding at `/a2a` and the Agent Card at the well-known path

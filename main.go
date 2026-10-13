@@ -59,10 +59,18 @@ func (a *application) createHTTPServer() run.Func {
 			return err
 		}
 
-		// The Docker and k8s implementations are wired in here by their own tasks; until
-		// then the provider refuses the selected backend on use rather than serving a
-		// request it cannot fulfil.
-		provider := pkg.NewBackendProvider(nil, nil)
+		// The docker implementation is wired in here; the k8s one is not yet, so the
+		// provider refuses that backend on use rather than serving a request it cannot
+		// fulfil. Wiring a backend is a change to this file by design — the provider is
+		// the single place that maps a backend name to its implementation.
+		provider := pkg.NewBackendProvider(
+			pkg.NewDockerBackend(
+				pkg.NewDockerCLIClient(),
+				pkg.NewTCPPortProber(),
+				pkg.DefaultDockerConfig(),
+			),
+			nil,
+		)
 		executor := pkg.NewA2AExecutor(provider, backend)
 
 		router := mux.NewRouter()
