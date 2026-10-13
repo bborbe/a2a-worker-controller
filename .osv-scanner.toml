@@ -1,0 +1,4 @@
+
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+reason = "golang.org/x/crypto/openpgp unmaintained, no fix will ship — advisory deprecates the package"

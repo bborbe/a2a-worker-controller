@@ -1,0 +1,3 @@
+
+apply:
+	bash -c 'source ${ROOTDIR}/example.env && find . -name "*.yaml" | while read -r file; do cat $${file} | teamvault-config-parser -teamvault-config="${TEAMVAULT}" -logtostderr -v=0 | kubectl apply --context=$${CLUSTER_CONTEXT} -f -; done'

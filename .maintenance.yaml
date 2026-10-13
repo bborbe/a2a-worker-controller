@@ -1,0 +1,7 @@
+watcher:
+  github-build:
+    # include_logs: true makes the github-build watcher fetch the failed-job
+    # log and append a ## Error snippet to the build-fix task body, so the
+    # build-fix agent's planning diagnosis has the actual error text (not just
+    # the Failing Workflows metadata table) even without a gh round-trip.
+    include_logs: true

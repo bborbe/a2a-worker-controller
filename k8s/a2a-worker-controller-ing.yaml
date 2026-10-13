@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: a2a-worker-controller
+  namespace: '{{ "NAMESPACE" | env }}'
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: websecure
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  ingressClassName: 'traefik'
+  rules:
+    - host: 'a2a-worker-controller.{{ "NAMESPACE" | env }}.quant.benjamin-borbe.de'
+      http:
+        paths:
+          - backend:
+              service:
+                name: a2a-worker-controller
+                port:
+                  name: http
+            path: /
+            pathType: Prefix
+  tls:
+    - secretName: tls-quant
+      hosts:
+        - 'a2a-worker-controller.{{ "NAMESPACE" | env }}.quant.benjamin-borbe.de'
