@@ -75,9 +75,13 @@ func NewWorkerResourceBuilder(config KubernetesConfig) WorkerResourceBuilder {
 // pod label agent.benjamin-borbe.de/assignee, which is what the egress NetworkPolicy selects
 // on), its public URL and card name, and the Secret it reads its credentials from.
 //
-// The routing fields are cleared. TaskType, TaskTypes and Trigger are how the executor sends
-// vault tasks to a Config by assignee, so a worker that inherited them would start receiving
-// the template's vault tasks on top of its own conversation.
+// The routing fields are neutralised. TaskType, TaskTypes and Trigger are how the executor
+// sends vault tasks to a Config by assignee, so a worker that inherited them would start
+// receiving the template's vault tasks on top of its own conversation.
+//
+// TaskType cannot simply be cleared: its JSON tag has no omitempty, so an empty value is sent
+// as "" and the CRD rejects it (`spec.taskType` must match ^[a-z0-9-]+$). It is set to the
+// worker's own name instead — a valid value no vault task carries, so nothing routes on it.
 func (b *workerResourceBuilder) BuildConfig(
 	template agentv1.Config,
 	workerID WorkerID,
@@ -89,7 +93,7 @@ func (b *workerResourceBuilder) BuildConfig(
 	spec.SecretName = name
 	// Deprecated in favour of TaskTypes, but still read by the executor's router, so a
 	// clone that kept it would still route vault tasks to the worker.
-	spec.TaskType = "" //nolint:staticcheck // clearing a deprecated-but-live routing field
+	spec.TaskType = name //nolint:staticcheck // neutralising a deprecated-but-live routing field
 	spec.TaskTypes = nil
 	spec.Trigger = nil
 	if spec.Env == nil {

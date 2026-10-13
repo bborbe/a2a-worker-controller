@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- fix: set each k8s worker Config's `taskType` to the worker's own name instead of clearing it — the field's JSON tag has no `omitempty`, so the cleared value was sent as `""`, which the `Config` CRD rejects (`spec.taskType` must match `^[a-z0-9-]+$`); every `create` on nuke dev failed with `spec.taskType: Invalid value: ""`. The worker's own name is valid and no vault task carries it, so nothing routes to the worker
+
 ## v0.6.0
 
 - feat: confine every k8s worker's egress with its own NetworkPolicy — on `create` the controller writes a policy owned by the worker's Config that selects the pod by `agent.benjamin-borbe.de/assignee=<worker>` (no static policy can select the workers alone, since the executor puts no Config label on the pod and selectors cannot prefix-match), declares only the Egress type so the worker's Ingress stays reachable, and allows DNS plus the in-cluster `namespace:port` destinations listed in the new `EGRESS_ALLOW` setting; the policy is written before the worker's Secret, so the pod cannot start unconfined, and `stop`'s Config delete garbage-collects it with the rest
