@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.2.0
 
 - feat: serve the control API over A2A — a JSON-RPC binding at `/a2a` and the Agent Card at the well-known path
 - feat: define the `WorkerBackend` seam and the backend selection wiring that resolves a backend name to its implementation
