@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.5.0
 
 - feat: add the k8s backend — `BACKEND=k8s` runs each worker as a per-task pod by writing, through the executor's typed clientset, one `type: service` agent `Config` the executor reconciles into a StatefulSet, cloned from a live template Config (`WORKER_TEMPLATE`, default `claude-interactive`) so the image pin and priority class stay where the chart keeps them, with the template's `trigger`, `taskType` and `taskTypes` cleared so the executor never routes vault tasks to a worker; each worker gets its own token Secret (the template Secret's keys with `INTERACTIVE_AUTH_TOKEN` replaced), ClusterIP Service and TLS Ingress on `<worker>.<INGRESS_DOMAIN>`, all owned by its Config, so `stop` is one Config delete the garbage collector completes; `list` is rebuilt from Configs carrying the controller label and never returns one the chart rendered
 - chore: add `github.com/bborbe/agent-task-executor` v0.18.4 for the `Config` CRD's generated typed clientset, and `k8s.io/{api,apimachinery,client-go,apiextensions-apiserver}` v0.36.4 with v0.37.0 excluded, matching agent-task-executor — pinning `apiextensions-apiserver` without that exclude silently downgraded the executor module to v0.8.2, whose `ConfigSpec` has no `type` field, so every worker would have been cloned as a Job
