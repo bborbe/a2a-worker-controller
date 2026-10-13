@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: confine every k8s worker's egress with its own NetworkPolicy — on `create` the controller writes a policy owned by the worker's Config that selects the pod by `agent.benjamin-borbe.de/assignee=<worker>` (no static policy can select the workers alone, since the executor puts no Config label on the pod and selectors cannot prefix-match), declares only the Egress type so the worker's Ingress stays reachable, and allows DNS plus the in-cluster `namespace:port` destinations listed in the new `EGRESS_ALLOW` setting; the policy is written before the worker's Secret, so the pod cannot start unconfined, and `stop`'s Config delete garbage-collects it with the rest
+
 ## v0.5.0
 
 - feat: add the k8s backend — `BACKEND=k8s` runs each worker as a per-task pod by writing, through the executor's typed clientset, one `type: service` agent `Config` the executor reconciles into a StatefulSet, cloned from a live template Config (`WORKER_TEMPLATE`, default `claude-interactive`) so the image pin and priority class stay where the chart keeps them, with the template's `trigger`, `taskType` and `taskTypes` cleared so the executor never routes vault tasks to a worker; each worker gets its own token Secret (the template Secret's keys with `INTERACTIVE_AUTH_TOKEN` replaced), ClusterIP Service and TLS Ingress on `<worker>.<INGRESS_DOMAIN>`, all owned by its Config, so `stop` is one Config delete the garbage collector completes; `list` is rebuilt from Configs carrying the controller label and never returns one the chart rendered

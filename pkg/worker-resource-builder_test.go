@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -37,6 +38,10 @@ func testKubernetesConfig() pkg.KubernetesConfig {
 	config.Namespace = testNamespace
 	config.IngressDomain = testIngressDomain
 	config.TLSSecretName = testTLSSecretName
+	config.EgressAllow = []pkg.EgressDestination{
+		{Namespace: "dev", Port: 8788},
+		{Namespace: "monitoring", Port: 9090},
+	}
 	return config
 }
 
@@ -201,6 +206,7 @@ var _ = Describe("WorkerResourceBuilder", func() {
 				builder.BuildSecret(owner, templateSecret(), testWorkerToken),
 				builder.BuildService(owner),
 				builder.BuildIngress(owner),
+				builder.BuildNetworkPolicy(owner),
 			}
 			for _, object := range objects {
 				owners := object.GetOwnerReferences()
@@ -252,6 +258,55 @@ var _ = Describe("WorkerResourceBuilder", func() {
 			Expect(ingress.Annotations).To(HaveKeyWithValue(
 				"traefik.ingress.kubernetes.io/router.tls", "true",
 			))
+		})
+	})
+
+	Describe("BuildNetworkPolicy", func() {
+		var policy *networkingv1.NetworkPolicy
+
+		BeforeEach(func() {
+			policy = builder.BuildNetworkPolicy(storedWorkerConfig(builder))
+		})
+
+		It("selects only this worker's pod, by the assignee label the executor stamps", func() {
+			Expect(policy.Spec.PodSelector.MatchLabels).To(Equal(map[string]string{
+				"agent.benjamin-borbe.de/assignee": "a2a-worker-abcd",
+			}))
+		})
+
+		It("restricts egress only, so the Ingress stays reachable", func() {
+			Expect(policy.Spec.PolicyTypes).To(Equal([]networkingv1.PolicyType{
+				networkingv1.PolicyTypeEgress,
+			}))
+			Expect(policy.Spec.Ingress).To(BeEmpty())
+		})
+
+		It("allows DNS on UDP and TCP 53 in kube-system", func() {
+			dns := policy.Spec.Egress[0]
+			Expect(dns.To[0].NamespaceSelector.MatchLabels).To(Equal(map[string]string{
+				"kubernetes.io/metadata.name": "kube-system",
+			}))
+			Expect(dns.Ports).To(HaveLen(2))
+			Expect(*dns.Ports[0].Protocol).To(Equal(corev1.ProtocolUDP))
+			Expect(dns.Ports[0].Port.IntVal).To(BeEquivalentTo(53))
+			Expect(*dns.Ports[1].Protocol).To(Equal(corev1.ProtocolTCP))
+		})
+
+		It("allows each configured destination and nothing else", func() {
+			Expect(policy.Spec.Egress).To(HaveLen(3))
+			for i, want := range []struct {
+				namespace string
+				port      int32
+			}{{"dev", 8788}, {"monitoring", 9090}} {
+				rule := policy.Spec.Egress[i+1]
+				Expect(rule.To).To(HaveLen(1))
+				Expect(rule.To[0].NamespaceSelector.MatchLabels).To(HaveKeyWithValue(
+					"kubernetes.io/metadata.name", want.namespace,
+				))
+				Expect(rule.Ports).To(HaveLen(1))
+				Expect(*rule.Ports[0].Protocol).To(Equal(corev1.ProtocolTCP))
+				Expect(rule.Ports[0].Port.IntVal).To(Equal(want.port))
+			}
 		})
 	})
 

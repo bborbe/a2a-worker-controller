@@ -24,6 +24,16 @@ const (
 	kubernetesWorkerPortName = "http"
 )
 
+// The labels and DNS location the egress NetworkPolicy keys on. assigneePodLabel is the pod
+// label the executor copies a Config's assignee into; namespaceNameLabel is the label
+// Kubernetes stamps on every namespace with its own name.
+const (
+	assigneePodLabel   = "agent.benjamin-borbe.de/assignee"
+	namespaceNameLabel = "kubernetes.io/metadata.name"
+	dnsNamespace       = "kube-system"
+	dnsPort            = 53
+)
+
 //counterfeiter:generate -o ../mocks/pkg-worker-resource-builder.go --fake-name PkgWorkerResourceBuilder . WorkerResourceBuilder
 
 // WorkerResourceBuilder renders every Kubernetes object a k8s worker is made of. It decides
@@ -39,6 +49,8 @@ type WorkerResourceBuilder interface {
 	BuildService(owner agentv1.Config) *corev1.Service
 	// BuildIngress renders the TLS Ingress that exposes owner's Service on its own host.
 	BuildIngress(owner agentv1.Config) *networkingv1.Ingress
+	// BuildNetworkPolicy renders the egress NetworkPolicy that confines owner's pod.
+	BuildNetworkPolicy(owner agentv1.Config) *networkingv1.NetworkPolicy
 	// A2AURL is the address the worker named name advertises.
 	A2AURL(name string) string
 }
@@ -173,6 +185,56 @@ func (b *workerResourceBuilder) BuildIngress(owner agentv1.Config) *networkingv1
 				Hosts:      []string{host},
 				SecretName: b.config.TLSSecretName,
 			}},
+		},
+	}
+}
+
+// BuildNetworkPolicy confines the worker pod's egress to DNS plus the configured destinations.
+//
+// It is one policy per worker because no static policy can select the workers alone: the
+// executor puts no Config label on the pod, so the only pod label a worker owns is
+// agent.benjamin-borbe.de/assignee=<its Config name>, and a selector cannot prefix-match.
+// The policy declares only the Egress type, so the Ingress the manager reaches the worker
+// through stays open.
+func (b *workerResourceBuilder) BuildNetworkPolicy(
+	owner agentv1.Config,
+) *networkingv1.NetworkPolicy {
+	udp := corev1.ProtocolUDP
+	tcp := corev1.ProtocolTCP
+	dns := intstr.FromInt32(dnsPort)
+	rules := make([]networkingv1.NetworkPolicyEgressRule, 0, 1+len(b.config.EgressAllow))
+	rules = append(rules, networkingv1.NetworkPolicyEgressRule{
+		To: []networkingv1.NetworkPolicyPeer{namespacePeer(dnsNamespace)},
+		Ports: []networkingv1.NetworkPolicyPort{
+			{Protocol: &udp, Port: &dns},
+			{Protocol: &tcp, Port: &dns},
+		},
+	})
+	for _, destination := range b.config.EgressAllow {
+		port := intstr.FromInt32(destination.Port)
+		rules = append(rules, networkingv1.NetworkPolicyEgressRule{
+			To:    []networkingv1.NetworkPolicyPeer{namespacePeer(destination.Namespace)},
+			Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
+		})
+	}
+	return &networkingv1.NetworkPolicy{
+		ObjectMeta: b.childMeta(owner),
+		Spec: networkingv1.NetworkPolicySpec{
+			PodSelector: metav1.LabelSelector{
+				MatchLabels: map[string]string{assigneePodLabel: owner.Spec.Assignee},
+			},
+			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress},
+			Egress:      rules,
+		},
+	}
+}
+
+// namespacePeer selects every pod in namespace, by the name label Kubernetes stamps on each
+// namespace itself.
+func namespacePeer(namespace string) networkingv1.NetworkPolicyPeer {
+	return networkingv1.NetworkPolicyPeer{
+		NamespaceSelector: &metav1.LabelSelector{
+			MatchLabels: map[string]string{namespaceNameLabel: namespace},
 		},
 	}
 }
