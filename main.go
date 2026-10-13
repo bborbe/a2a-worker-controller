@@ -34,6 +34,7 @@ type application struct {
 	SentryProxy     string `required:"false" arg:"sentry-proxy"      env:"SENTRY_PROXY"      usage:"Sentry Proxy"`
 	Listen          string `required:"true"  arg:"listen"            env:"LISTEN"            usage:"address to listen to"`
 	Backend         string `required:"false" arg:"backend"           env:"BACKEND"           usage:"backend serving workers"                                                default:"docker"`
+	WorkerImage     string `required:"true"  arg:"worker-image"      env:"WORKER_IMAGE"      usage:"image every created worker container runs"`
 	A2APublicURL    string `required:"true"  arg:"a2a-public-url"    env:"A2A_PUBLIC_URL"    usage:"externally reachable A2A endpoint the card advertises"`
 	A2AAgentName    string `required:"false" arg:"a2a-agent-name"    env:"A2A_AGENT_NAME"    usage:"agent name the Agent Card advertises"                                   default:"a2a-worker-controller"`
 	A2AAuthToken    string `required:"true"  arg:"a2a-auth-token"    env:"A2A_AUTH_TOKEN"    usage:"bearer token every gated request must present"         display:"length"`
@@ -64,11 +65,19 @@ func (a *application) createHTTPServer() run.Func {
 		// provider refuses that backend on use rather than serving a request it cannot
 		// fulfil. Wiring a backend is a change to this file by design — the provider is
 		// the single place that maps a backend name to its implementation.
+		//
+		// The image is the one setting the backend cannot default. An untagged reference
+		// resolves to :latest, and no :latest is published for the worker image, so a
+		// default here would fail at create time with docker's own resolution error —
+		// after the controller had already accepted the request — instead of at startup.
+		// That is why it is required rather than defaulted, not for tidiness.
+		dockerConfig := pkg.DefaultDockerConfig()
+		dockerConfig.Image = a.WorkerImage
 		provider := pkg.NewBackendProvider(
 			pkg.NewDockerBackend(
 				pkg.NewDockerCLIClient(),
 				pkg.NewTCPPortProber(),
-				pkg.DefaultDockerConfig(),
+				dockerConfig,
 			),
 			nil,
 		)
