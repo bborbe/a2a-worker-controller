@@ -75,6 +75,9 @@ func NewWorkerResourceBuilder(config KubernetesConfig) WorkerResourceBuilder {
 // pod label agent.benjamin-borbe.de/assignee, which is what the egress NetworkPolicy selects
 // on), its public URL and card name, and the Secret it reads its credentials from.
 //
+// The priority class is replaced when WorkerPriorityClass is set: on this cluster each class
+// carries its own pod quota, so a worker must not count against the template's.
+//
 // The routing fields are neutralised. TaskType, TaskTypes and Trigger are how the executor
 // sends vault tasks to a Config by assignee, so a worker that inherited them would start
 // receiving the template's vault tasks on top of its own conversation.
@@ -96,6 +99,9 @@ func (b *workerResourceBuilder) BuildConfig(
 	spec.TaskType = name //nolint:staticcheck // neutralising a deprecated-but-live routing field
 	spec.TaskTypes = nil
 	spec.Trigger = nil
+	if b.config.WorkerPriorityClass != "" {
+		spec.PriorityClassName = b.config.WorkerPriorityClass
+	}
 	if spec.Env == nil {
 		spec.Env = map[string]string{}
 	}

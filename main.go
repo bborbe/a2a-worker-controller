@@ -30,21 +30,22 @@ func main() {
 }
 
 type application struct {
-	SentryDSN       string `required:"true"  arg:"sentry-dsn"        env:"SENTRY_DSN"        usage:"SentryDSN"                                                           display:"length"`
-	SentryProxy     string `required:"false" arg:"sentry-proxy"      env:"SENTRY_PROXY"      usage:"Sentry Proxy"`
-	Listen          string `required:"true"  arg:"listen"            env:"LISTEN"            usage:"address to listen to"`
-	Backend         string `required:"false" arg:"backend"           env:"BACKEND"           usage:"backend serving workers"                                                              default:"docker"`
-	WorkerImage     string `required:"true"  arg:"worker-image"      env:"WORKER_IMAGE"      usage:"image every created worker container runs"`
-	A2APublicURL    string `required:"true"  arg:"a2a-public-url"    env:"A2A_PUBLIC_URL"    usage:"externally reachable A2A endpoint the card advertises"`
-	A2AAgentName    string `required:"false" arg:"a2a-agent-name"    env:"A2A_AGENT_NAME"    usage:"agent name the Agent Card advertises"                                                 default:"a2a-worker-controller"`
-	A2AAuthToken    string `required:"true"  arg:"a2a-auth-token"    env:"A2A_AUTH_TOKEN"    usage:"bearer token every gated request must present"                       display:"length"`
-	Namespace       string `required:"false" arg:"namespace"         env:"NAMESPACE"         usage:"k8s backend: namespace every worker is created in"`
-	WorkerTemplate  string `required:"false" arg:"worker-template"   env:"WORKER_TEMPLATE"   usage:"k8s backend: Config every worker is cloned from"                                      default:"claude-interactive"`
-	IngressDomain   string `required:"false" arg:"ingress-domain"    env:"INGRESS_DOMAIN"    usage:"k8s backend: parent domain of every worker host"`
-	TLSSecretName   string `required:"false" arg:"tls-secret-name"   env:"TLS_SECRET_NAME"   usage:"k8s backend: wildcard certificate Secret for the ingress domain"`
-	EgressAllow     string `required:"false" arg:"egress-allow"      env:"EGRESS_ALLOW"      usage:"k8s backend: namespace:port list every worker may reach besides DNS"`
-	BuildGitVersion string `required:"false" arg:"build-git-version" env:"BUILD_GIT_VERSION" usage:"Build Git version"                                                                    default:"dev"`
-	BuildGitCommit  string `required:"false" arg:"build-git-commit"  env:"BUILD_GIT_COMMIT"  usage:"Build Git commit hash"                                                                default:"none"`
+	SentryDSN       string `required:"true"  arg:"sentry-dsn"            env:"SENTRY_DSN"            usage:"SentryDSN"                                                                           display:"length"`
+	SentryProxy     string `required:"false" arg:"sentry-proxy"          env:"SENTRY_PROXY"          usage:"Sentry Proxy"`
+	Listen          string `required:"true"  arg:"listen"                env:"LISTEN"                usage:"address to listen to"`
+	Backend         string `required:"false" arg:"backend"               env:"BACKEND"               usage:"backend serving workers"                                                                              default:"docker"`
+	WorkerImage     string `required:"true"  arg:"worker-image"          env:"WORKER_IMAGE"          usage:"image every created worker container runs"`
+	A2APublicURL    string `required:"true"  arg:"a2a-public-url"        env:"A2A_PUBLIC_URL"        usage:"externally reachable A2A endpoint the card advertises"`
+	A2AAgentName    string `required:"false" arg:"a2a-agent-name"        env:"A2A_AGENT_NAME"        usage:"agent name the Agent Card advertises"                                                                 default:"a2a-worker-controller"`
+	A2AAuthToken    string `required:"true"  arg:"a2a-auth-token"        env:"A2A_AUTH_TOKEN"        usage:"bearer token every gated request must present"                                       display:"length"`
+	Namespace       string `required:"false" arg:"namespace"             env:"NAMESPACE"             usage:"k8s backend: namespace every worker is created in"`
+	WorkerTemplate  string `required:"false" arg:"worker-template"       env:"WORKER_TEMPLATE"       usage:"k8s backend: Config every worker is cloned from"                                                      default:"claude-interactive"`
+	IngressDomain   string `required:"false" arg:"ingress-domain"        env:"INGRESS_DOMAIN"        usage:"k8s backend: parent domain of every worker host"`
+	TLSSecretName   string `required:"false" arg:"tls-secret-name"       env:"TLS_SECRET_NAME"       usage:"k8s backend: wildcard certificate Secret for the ingress domain"`
+	WorkerPriority  string `required:"false" arg:"worker-priority-class" env:"WORKER_PRIORITY_CLASS" usage:"k8s backend: PriorityClass every worker pod runs under (empty keeps the template's)"`
+	EgressAllow     string `required:"false" arg:"egress-allow"          env:"EGRESS_ALLOW"          usage:"k8s backend: namespace:port list every worker may reach besides DNS"`
+	BuildGitVersion string `required:"false" arg:"build-git-version"     env:"BUILD_GIT_VERSION"     usage:"Build Git version"                                                                                    default:"dev"`
+	BuildGitCommit  string `required:"false" arg:"build-git-commit"      env:"BUILD_GIT_COMMIT"      usage:"Build Git commit hash"                                                                                default:"none"`
 }
 
 func (a *application) Run(ctx context.Context, sentryClient libsentry.Client) error {
@@ -170,6 +171,7 @@ func (a *application) kubernetesBackend(
 	config.IngressDomain = a.IngressDomain
 	config.TLSSecretName = a.TLSSecretName
 	config.EgressAllow = egressAllow
+	config.WorkerPriorityClass = a.WorkerPriority
 	return pkg.NewKubernetesBackend(
 		client,
 		pkg.NewWorkerResourceBuilder(config),

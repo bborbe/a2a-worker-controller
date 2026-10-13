@@ -41,6 +41,11 @@ type KubernetesConfig struct {
 	IngressClassName string
 	// TLSSecretName names the wildcard certificate Secret covering IngressDomain.
 	TLSSecretName string
+	// WorkerPriorityClass is the PriorityClass every worker pod runs under. Empty keeps the
+	// template's class. It exists because a class carries its own ResourceQuota on the cluster:
+	// workers that inherited the template's class would share the template's pod cap, which the
+	// template's own pod already fills.
+	WorkerPriorityClass string
 	// EgressAllow lists the in-cluster destinations each worker's NetworkPolicy allows, on top
 	// of DNS. Everything else — the public internet included — is denied.
 	EgressAllow []EgressDestination

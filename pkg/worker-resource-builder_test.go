@@ -113,6 +113,20 @@ var _ = Describe("WorkerResourceBuilder", func() {
 			Expect(config.Spec.SecretName).To(Equal("a2a-worker-abcd"))
 		})
 
+		Context("with a worker priority class", func() {
+			BeforeEach(func() {
+				kubernetesConfig := testKubernetesConfig()
+				kubernetesConfig.WorkerPriorityClass = "a2a-worker"
+				config = pkg.NewWorkerResourceBuilder(kubernetesConfig).
+					BuildConfig(template, "abcd", "Build the k3s Backend")
+			})
+
+			It("runs the worker under its own class, not the template's quota", func() {
+				Expect(config.Spec.PriorityClassName).To(Equal("a2a-worker"))
+				Expect(template.Spec.PriorityClassName).To(Equal("claude-interactive"))
+			})
+		})
+
 		It("keeps the template's image, type and priority class", func() {
 			Expect(config.Spec.Image).To(Equal(testImage))
 			Expect(config.Spec.Type).To(Equal(agentv1.AgentTypeService))
