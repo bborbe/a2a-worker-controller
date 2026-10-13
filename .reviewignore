@@ -1,0 +1,4 @@
+# dark-factory pipeline state — excluded from the size gate
+prompts/
+specs/
+mocks/

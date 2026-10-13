@@ -1,0 +1,36 @@
+DIRS += $(shell find */* -maxdepth 0 -name Makefile -exec dirname "{}" \;)
+
+.PHONY: build
+build:
+	DOCKER_BUILDKIT=1 \
+	docker build \
+	--rm=true \
+	--platform=linux/amd64 \
+	--build-arg DOCKER_REGISTRY=$(DOCKER_REGISTRY) \
+	--build-arg BRANCH=$(BRANCH) \
+	--build-arg BUILD_GIT_VERSION=$$(git describe --tags --always --dirty) \
+	--build-arg BUILD_GIT_COMMIT=$$(git rev-parse --short HEAD) \
+	--build-arg BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+	-t $(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH) \
+	-f Dockerfile .
+
+.PHONY: upload
+upload:
+	docker push $(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH)
+
+.PHONY: clean
+clean:
+	docker rmi $(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH) || true
+	docker builder prune --max-used-space 21474836480 -f || true
+
+.PHONY: apply
+apply:
+	@for i in $(DIRS); do \
+		cd $$i; \
+		echo "apply $${i}"; \
+		make apply; \
+		cd ..; \
+	done
+
+.PHONY: buca
+buca: build upload clean apply
