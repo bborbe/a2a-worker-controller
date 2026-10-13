@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bborbe/errors"
 )
@@ -189,13 +190,20 @@ func (p *tcpPortProber) IsFree(_ context.Context, port int) bool {
 // implementation of WorkerBackend that names docker; the schema, the executor and the
 // selection wiring stay backend-independent.
 //
-// It holds no state between calls. Every list reads the daemon and every create dedups
+// It holds no worker state between calls. Every list reads the daemon and every create dedups
 // against it, so a controller restart loses nothing and a second controller sharing the
 // daemon sees the same workers.
 type dockerBackend struct {
 	client DockerClient
 	prober PortProber
 	config DockerConfig
+	// mutex serializes Create, because both of its read-then-act pairs race otherwise: the
+	// dedup read and the port search each happen before the docker run that acts on them,
+	// so two overlapping creates can start two containers for one task, or pick one port
+	// twice. It closes those within this process only — two controllers sharing a daemon
+	// still race, which is why the port search reads the daemon rather than trusting a
+	// single reading.
+	mutex sync.Mutex
 }
 
 var _ WorkerBackend = (*dockerBackend)(nil)
@@ -218,6 +226,9 @@ func NewDockerBackend(client DockerClient, prober PortProber, config DockerConfi
 // the controller kept no copy of it — so that reply carries the worker and an empty token; a
 // caller that has lost the credential stops the worker and creates another.
 func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateResponse, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
 	containers, err := b.listContainers(ctx)
 	if err != nil {
 		return nil, err
@@ -308,11 +319,20 @@ func (b *dockerBackend) listContainers(ctx context.Context) ([]dockerContainer, 
 	return parseContainers(stdout), nil
 }
 
-// freePort returns the first free host port in the configured range. Each candidate is
-// bind-checked before it is offered, so a port another process already holds is skipped
-// rather than published on and lost.
+// freePort returns the first host port in the configured range that neither a running
+// container publishes nor the host already holds.
+//
+// Both checks are needed and neither is sufficient. The daemon knows its own published
+// ports; the bind check knows about processes that are not containers.
 func (b *dockerBackend) freePort(ctx context.Context) (int, error) {
+	published, err := b.publishedPorts(ctx)
+	if err != nil {
+		return 0, err
+	}
 	for port := b.config.PortStart; port <= b.config.PortEnd; port++ {
+		if published[port] {
+			continue
+		}
 		if b.prober.IsFree(ctx, port) {
 			return port, nil
 		}
@@ -323,6 +343,56 @@ func (b *dockerBackend) freePort(ctx context.Context) (int, error) {
 		b.config.PortStart,
 		b.config.PortEnd,
 	)
+}
+
+// publishedPorts returns every host port a running container publishes.
+//
+// This is read from the daemon rather than probed on a socket, and that is load-bearing
+// rather than defensive. On macOS, Docker Desktop forwards a published port in userspace:
+// nothing on the host holds it from the operating system's point of view, so a bind check
+// reports a port a running container has already published as free. Trusting the bind check
+// alone makes the search return its FIRST candidate on every call, so the first create takes
+// the port and every later create collides with it — docker answers `Bind for 0.0.0.0:<port>
+// failed: port is already allocated` after it has already created the container, leaving a
+// never-started container behind that carries the task label the dedup reads.
+func (b *dockerBackend) publishedPorts(ctx context.Context) (map[int]bool, error) {
+	stdout, err := b.client.Run(
+		ctx,
+		[]string{"ps", "--no-trunc", "--format", "{{.Ports}}"},
+		nil,
+	)
+	if err != nil {
+		return nil, errors.Wrap(ctx, err, "list published ports failed")
+	}
+	return publishedHostPorts(stdout), nil
+}
+
+// publishedHostPorts parses `docker ps --format '{{.Ports}}'` output into the set of host
+// ports it publishes. Each mapping reads `0.0.0.0:9093->9090/tcp`, so the host port is the
+// number after the last colon on the left of the arrow. A container publishing nothing
+// contributes an empty line, and a line without an arrow contributes nothing.
+func publishedHostPorts(stdout string) map[int]bool {
+	ports := map[int]bool{}
+	for _, line := range strings.Split(stdout, "\n") {
+		for _, mapping := range strings.Split(line, ",") {
+			mapping = strings.TrimSpace(mapping)
+			arrow := strings.Index(mapping, "->")
+			if arrow < 0 {
+				continue
+			}
+			host := mapping[:arrow]
+			colon := strings.LastIndex(host, ":")
+			if colon < 0 {
+				continue
+			}
+			port, err := strconv.Atoi(host[colon+1:])
+			if err != nil {
+				continue
+			}
+			ports[port] = true
+		}
+	}
+	return ports
 }
 
 // listArgs is the docker ps invocation every read uses. The filter is the controller label,
