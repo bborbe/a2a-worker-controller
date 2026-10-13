@@ -120,11 +120,13 @@ var _ = Describe("WorkerResourceBuilder", func() {
 			Expect(config.Spec.Heartbeat).To(Equal("5m"))
 		})
 
-		It("clears every routing field, so the executor never sends the worker vault tasks",
+		It("neutralises every routing field, so the executor never sends the worker vault tasks",
 			func() {
+				// Never empty: the CRD rejects "" (no omitempty on the tag). The worker's own
+				// name is a valid task type no vault task carries.
 				Expect(
 					config.Spec.TaskType,
-				).To(BeEmpty())
+				).To(Equal("a2a-worker-abcd"))
 				//nolint:staticcheck // asserting it is cleared
 				Expect(config.Spec.TaskTypes).To(BeNil())
 				Expect(config.Spec.Trigger).To(BeNil())
