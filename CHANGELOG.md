@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- fix: register the artifact type with gob — the A2A task store copies every task through `encoding/gob` and registers only its own collection types, so an unregistered `*ControlResponse` failed the copy *after* the executor had already done its work and every control call returned `TASK_STATE_FAILED` on a running binary while the specs stayed green
+
 ## v0.4.0
 
 - feat: require a bearer token on every gated route — the gate wraps the router, so `/a2a` and any route registered after it are covered by construction, with the five canonical admin endpoints exempt
