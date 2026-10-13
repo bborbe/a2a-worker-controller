@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.4.2
 
 - fix: make the worker image configurable and required — the backend ran a compile-time constant whose untagged reference resolves to `:latest`, a tag published nowhere for that image, so every `create` failed on docker's own resolution error after the request had already been accepted; the image now comes from configuration as `WORKER_IMAGE` and the binary refuses to start without it, since no default can resolve
 
