@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.4.4
 
 - docs: replace the boilerplate README with an accurate recipe — the Usage block documented `-kafka-brokers` and `-datadir`, neither of which this controller has, and omitted every required flag; the README now lists the real configuration, the control API's request and reply shapes, the ownership labels, and the `ANTHROPIC_AUTH_TOKEN` requirement whose absence lets a worker start and serve its Agent Card while answering `Not logged in` to every turn
 
