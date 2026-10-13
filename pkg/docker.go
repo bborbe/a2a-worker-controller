@@ -41,7 +41,12 @@ const (
 // The worker container's fixed settings. They mirror the local-docker-run recipe the agent
 // image documents, which is the command create automates.
 const (
-	// DefaultDockerImage is the image every worker runs.
+	// DefaultDockerImage is the image every worker runs. ⚠️ It is untagged, so docker
+	// resolves it to :latest — and no :latest is published for this image, upstream or
+	// locally, so a create that used this value verbatim would fail with docker's own
+	// resolution error rather than anything naming the real cause. The binary therefore
+	// requires the image to be configured and overrides this field; it survives as the
+	// package's own placeholder, not as a value that resolves.
 	DefaultDockerImage = "bborbe/agent-claude"
 	// DefaultAgentNameBase prefixes the name each worker's Agent Card advertises; the worker
 	// id is appended so two workers never advertise the same name.

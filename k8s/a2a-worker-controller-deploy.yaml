@@ -46,6 +46,8 @@ spec:
           env:
             - name: LISTEN
               value: ':9090'
+            - name: WORKER_IMAGE
+              value: '{{"WORKER_IMAGE" | env}}'
             - name: SENTRY_DSN
               valueFrom:
                 secretKeyRef:
