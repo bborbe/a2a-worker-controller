@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.4.3
 
 - fix: read published ports from the daemon before choosing one — a bind check cannot see a port a running container has published on macOS, where Docker Desktop forwards it in userspace, so the search returned its first candidate on every call and every `create` after the first collided on port 9093
 - fix: serialize `create` — its dedup read and its port search both happen before the `docker run` that acts on them, so two overlapping creates could start two containers for one task or pick one port twice
