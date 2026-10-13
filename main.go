@@ -164,5 +164,9 @@ func (a *application) kubernetesBackend(
 	config.TemplateConfig = a.WorkerTemplate
 	config.IngressDomain = a.IngressDomain
 	config.TLSSecretName = a.TLSSecretName
-	return pkg.NewKubernetesBackend(client, config), nil
+	return pkg.NewKubernetesBackend(
+		client,
+		pkg.NewWorkerResourceBuilder(config),
+		config.TemplateConfig,
+	), nil
 }

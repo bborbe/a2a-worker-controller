@@ -6,31 +6,31 @@ import (
 	"sync"
 
 	"github.com/bborbe/a2a-worker-controller/pkg"
-	v1a "k8s.io/api/core/v1"
-	v1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	v1 "github.com/bborbe/agent-task-executor/k8s/apis/agent.benjamin-borbe.de/v1"
+	v1b "k8s.io/api/core/v1"
+	v1a "k8s.io/api/networking/v1"
 )
 
 type PkgKubernetesClient struct {
-	CreateConfigStub        func(context.Context, *unstructured.Unstructured) (*unstructured.Unstructured, error)
+	CreateConfigStub        func(context.Context, *v1.Config) (*v1.Config, error)
 	createConfigMutex       sync.RWMutex
 	createConfigArgsForCall []struct {
 		arg1 context.Context
-		arg2 *unstructured.Unstructured
+		arg2 *v1.Config
 	}
 	createConfigReturns struct {
-		result1 *unstructured.Unstructured
+		result1 *v1.Config
 		result2 error
 	}
 	createConfigReturnsOnCall map[int]struct {
-		result1 *unstructured.Unstructured
+		result1 *v1.Config
 		result2 error
 	}
-	CreateIngressStub        func(context.Context, *v1.Ingress) error
+	CreateIngressStub        func(context.Context, *v1a.Ingress) error
 	createIngressMutex       sync.RWMutex
 	createIngressArgsForCall []struct {
 		arg1 context.Context
-		arg2 *v1.Ingress
+		arg2 *v1a.Ingress
 	}
 	createIngressReturns struct {
 		result1 error
@@ -38,11 +38,11 @@ type PkgKubernetesClient struct {
 	createIngressReturnsOnCall map[int]struct {
 		result1 error
 	}
-	CreateSecretStub        func(context.Context, *v1a.Secret) error
+	CreateSecretStub        func(context.Context, *v1b.Secret) error
 	createSecretMutex       sync.RWMutex
 	createSecretArgsForCall []struct {
 		arg1 context.Context
-		arg2 *v1a.Secret
+		arg2 *v1b.Secret
 	}
 	createSecretReturns struct {
 		result1 error
@@ -50,11 +50,11 @@ type PkgKubernetesClient struct {
 	createSecretReturnsOnCall map[int]struct {
 		result1 error
 	}
-	CreateServiceStub        func(context.Context, *v1a.Service) error
+	CreateServiceStub        func(context.Context, *v1b.Service) error
 	createServiceMutex       sync.RWMutex
 	createServiceArgsForCall []struct {
 		arg1 context.Context
-		arg2 *v1a.Service
+		arg2 *v1b.Service
 	}
 	createServiceReturns struct {
 		result1 error
@@ -74,58 +74,58 @@ type PkgKubernetesClient struct {
 	deleteConfigReturnsOnCall map[int]struct {
 		result1 error
 	}
-	GetConfigStub        func(context.Context, string) (*unstructured.Unstructured, error)
+	GetConfigStub        func(context.Context, string) (*v1.Config, error)
 	getConfigMutex       sync.RWMutex
 	getConfigArgsForCall []struct {
 		arg1 context.Context
 		arg2 string
 	}
 	getConfigReturns struct {
-		result1 *unstructured.Unstructured
+		result1 *v1.Config
 		result2 error
 	}
 	getConfigReturnsOnCall map[int]struct {
-		result1 *unstructured.Unstructured
+		result1 *v1.Config
 		result2 error
 	}
-	GetSecretStub        func(context.Context, string) (*v1a.Secret, error)
+	GetSecretStub        func(context.Context, string) (*v1b.Secret, error)
 	getSecretMutex       sync.RWMutex
 	getSecretArgsForCall []struct {
 		arg1 context.Context
 		arg2 string
 	}
 	getSecretReturns struct {
-		result1 *v1a.Secret
+		result1 *v1b.Secret
 		result2 error
 	}
 	getSecretReturnsOnCall map[int]struct {
-		result1 *v1a.Secret
+		result1 *v1b.Secret
 		result2 error
 	}
-	ListConfigsStub        func(context.Context, string) ([]unstructured.Unstructured, error)
+	ListConfigsStub        func(context.Context, string) ([]v1.Config, error)
 	listConfigsMutex       sync.RWMutex
 	listConfigsArgsForCall []struct {
 		arg1 context.Context
 		arg2 string
 	}
 	listConfigsReturns struct {
-		result1 []unstructured.Unstructured
+		result1 []v1.Config
 		result2 error
 	}
 	listConfigsReturnsOnCall map[int]struct {
-		result1 []unstructured.Unstructured
+		result1 []v1.Config
 		result2 error
 	}
 	invocations      map[string][][]interface{}
 	invocationsMutex sync.RWMutex
 }
 
-func (fake *PkgKubernetesClient) CreateConfig(arg1 context.Context, arg2 *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+func (fake *PkgKubernetesClient) CreateConfig(arg1 context.Context, arg2 *v1.Config) (*v1.Config, error) {
 	fake.createConfigMutex.Lock()
 	ret, specificReturn := fake.createConfigReturnsOnCall[len(fake.createConfigArgsForCall)]
 	fake.createConfigArgsForCall = append(fake.createConfigArgsForCall, struct {
 		arg1 context.Context
-		arg2 *unstructured.Unstructured
+		arg2 *v1.Config
 	}{arg1, arg2})
 	stub := fake.CreateConfigStub
 	fakeReturns := fake.createConfigReturns
@@ -146,51 +146,51 @@ func (fake *PkgKubernetesClient) CreateConfigCallCount() int {
 	return len(fake.createConfigArgsForCall)
 }
 
-func (fake *PkgKubernetesClient) CreateConfigCalls(stub func(context.Context, *unstructured.Unstructured) (*unstructured.Unstructured, error)) {
+func (fake *PkgKubernetesClient) CreateConfigCalls(stub func(context.Context, *v1.Config) (*v1.Config, error)) {
 	fake.createConfigMutex.Lock()
 	defer fake.createConfigMutex.Unlock()
 	fake.CreateConfigStub = stub
 }
 
-func (fake *PkgKubernetesClient) CreateConfigArgsForCall(i int) (context.Context, *unstructured.Unstructured) {
+func (fake *PkgKubernetesClient) CreateConfigArgsForCall(i int) (context.Context, *v1.Config) {
 	fake.createConfigMutex.RLock()
 	defer fake.createConfigMutex.RUnlock()
 	argsForCall := fake.createConfigArgsForCall[i]
 	return argsForCall.arg1, argsForCall.arg2
 }
 
-func (fake *PkgKubernetesClient) CreateConfigReturns(result1 *unstructured.Unstructured, result2 error) {
+func (fake *PkgKubernetesClient) CreateConfigReturns(result1 *v1.Config, result2 error) {
 	fake.createConfigMutex.Lock()
 	defer fake.createConfigMutex.Unlock()
 	fake.CreateConfigStub = nil
 	fake.createConfigReturns = struct {
-		result1 *unstructured.Unstructured
+		result1 *v1.Config
 		result2 error
 	}{result1, result2}
 }
 
-func (fake *PkgKubernetesClient) CreateConfigReturnsOnCall(i int, result1 *unstructured.Unstructured, result2 error) {
+func (fake *PkgKubernetesClient) CreateConfigReturnsOnCall(i int, result1 *v1.Config, result2 error) {
 	fake.createConfigMutex.Lock()
 	defer fake.createConfigMutex.Unlock()
 	fake.CreateConfigStub = nil
 	if fake.createConfigReturnsOnCall == nil {
 		fake.createConfigReturnsOnCall = make(map[int]struct {
-			result1 *unstructured.Unstructured
+			result1 *v1.Config
 			result2 error
 		})
 	}
 	fake.createConfigReturnsOnCall[i] = struct {
-		result1 *unstructured.Unstructured
+		result1 *v1.Config
 		result2 error
 	}{result1, result2}
 }
 
-func (fake *PkgKubernetesClient) CreateIngress(arg1 context.Context, arg2 *v1.Ingress) error {
+func (fake *PkgKubernetesClient) CreateIngress(arg1 context.Context, arg2 *v1a.Ingress) error {
 	fake.createIngressMutex.Lock()
 	ret, specificReturn := fake.createIngressReturnsOnCall[len(fake.createIngressArgsForCall)]
 	fake.createIngressArgsForCall = append(fake.createIngressArgsForCall, struct {
 		arg1 context.Context
-		arg2 *v1.Ingress
+		arg2 *v1a.Ingress
 	}{arg1, arg2})
 	stub := fake.CreateIngressStub
 	fakeReturns := fake.createIngressReturns
@@ -211,13 +211,13 @@ func (fake *PkgKubernetesClient) CreateIngressCallCount() int {
 	return len(fake.createIngressArgsForCall)
 }
 
-func (fake *PkgKubernetesClient) CreateIngressCalls(stub func(context.Context, *v1.Ingress) error) {
+func (fake *PkgKubernetesClient) CreateIngressCalls(stub func(context.Context, *v1a.Ingress) error) {
 	fake.createIngressMutex.Lock()
 	defer fake.createIngressMutex.Unlock()
 	fake.CreateIngressStub = stub
 }
 
-func (fake *PkgKubernetesClient) CreateIngressArgsForCall(i int) (context.Context, *v1.Ingress) {
+func (fake *PkgKubernetesClient) CreateIngressArgsForCall(i int) (context.Context, *v1a.Ingress) {
 	fake.createIngressMutex.RLock()
 	defer fake.createIngressMutex.RUnlock()
 	argsForCall := fake.createIngressArgsForCall[i]
@@ -247,12 +247,12 @@ func (fake *PkgKubernetesClient) CreateIngressReturnsOnCall(i int, result1 error
 	}{result1}
 }
 
-func (fake *PkgKubernetesClient) CreateSecret(arg1 context.Context, arg2 *v1a.Secret) error {
+func (fake *PkgKubernetesClient) CreateSecret(arg1 context.Context, arg2 *v1b.Secret) error {
 	fake.createSecretMutex.Lock()
 	ret, specificReturn := fake.createSecretReturnsOnCall[len(fake.createSecretArgsForCall)]
 	fake.createSecretArgsForCall = append(fake.createSecretArgsForCall, struct {
 		arg1 context.Context
-		arg2 *v1a.Secret
+		arg2 *v1b.Secret
 	}{arg1, arg2})
 	stub := fake.CreateSecretStub
 	fakeReturns := fake.createSecretReturns
@@ -273,13 +273,13 @@ func (fake *PkgKubernetesClient) CreateSecretCallCount() int {
 	return len(fake.createSecretArgsForCall)
 }
 
-func (fake *PkgKubernetesClient) CreateSecretCalls(stub func(context.Context, *v1a.Secret) error) {
+func (fake *PkgKubernetesClient) CreateSecretCalls(stub func(context.Context, *v1b.Secret) error) {
 	fake.createSecretMutex.Lock()
 	defer fake.createSecretMutex.Unlock()
 	fake.CreateSecretStub = stub
 }
 
-func (fake *PkgKubernetesClient) CreateSecretArgsForCall(i int) (context.Context, *v1a.Secret) {
+func (fake *PkgKubernetesClient) CreateSecretArgsForCall(i int) (context.Context, *v1b.Secret) {
 	fake.createSecretMutex.RLock()
 	defer fake.createSecretMutex.RUnlock()
 	argsForCall := fake.createSecretArgsForCall[i]
@@ -309,12 +309,12 @@ func (fake *PkgKubernetesClient) CreateSecretReturnsOnCall(i int, result1 error)
 	}{result1}
 }
 
-func (fake *PkgKubernetesClient) CreateService(arg1 context.Context, arg2 *v1a.Service) error {
+func (fake *PkgKubernetesClient) CreateService(arg1 context.Context, arg2 *v1b.Service) error {
 	fake.createServiceMutex.Lock()
 	ret, specificReturn := fake.createServiceReturnsOnCall[len(fake.createServiceArgsForCall)]
 	fake.createServiceArgsForCall = append(fake.createServiceArgsForCall, struct {
 		arg1 context.Context
-		arg2 *v1a.Service
+		arg2 *v1b.Service
 	}{arg1, arg2})
 	stub := fake.CreateServiceStub
 	fakeReturns := fake.createServiceReturns
@@ -335,13 +335,13 @@ func (fake *PkgKubernetesClient) CreateServiceCallCount() int {
 	return len(fake.createServiceArgsForCall)
 }
 
-func (fake *PkgKubernetesClient) CreateServiceCalls(stub func(context.Context, *v1a.Service) error) {
+func (fake *PkgKubernetesClient) CreateServiceCalls(stub func(context.Context, *v1b.Service) error) {
 	fake.createServiceMutex.Lock()
 	defer fake.createServiceMutex.Unlock()
 	fake.CreateServiceStub = stub
 }
 
-func (fake *PkgKubernetesClient) CreateServiceArgsForCall(i int) (context.Context, *v1a.Service) {
+func (fake *PkgKubernetesClient) CreateServiceArgsForCall(i int) (context.Context, *v1b.Service) {
 	fake.createServiceMutex.RLock()
 	defer fake.createServiceMutex.RUnlock()
 	argsForCall := fake.createServiceArgsForCall[i]
@@ -433,7 +433,7 @@ func (fake *PkgKubernetesClient) DeleteConfigReturnsOnCall(i int, result1 error)
 	}{result1}
 }
 
-func (fake *PkgKubernetesClient) GetConfig(arg1 context.Context, arg2 string) (*unstructured.Unstructured, error) {
+func (fake *PkgKubernetesClient) GetConfig(arg1 context.Context, arg2 string) (*v1.Config, error) {
 	fake.getConfigMutex.Lock()
 	ret, specificReturn := fake.getConfigReturnsOnCall[len(fake.getConfigArgsForCall)]
 	fake.getConfigArgsForCall = append(fake.getConfigArgsForCall, struct {
@@ -459,7 +459,7 @@ func (fake *PkgKubernetesClient) GetConfigCallCount() int {
 	return len(fake.getConfigArgsForCall)
 }
 
-func (fake *PkgKubernetesClient) GetConfigCalls(stub func(context.Context, string) (*unstructured.Unstructured, error)) {
+func (fake *PkgKubernetesClient) GetConfigCalls(stub func(context.Context, string) (*v1.Config, error)) {
 	fake.getConfigMutex.Lock()
 	defer fake.getConfigMutex.Unlock()
 	fake.GetConfigStub = stub
@@ -472,33 +472,33 @@ func (fake *PkgKubernetesClient) GetConfigArgsForCall(i int) (context.Context, s
 	return argsForCall.arg1, argsForCall.arg2
 }
 
-func (fake *PkgKubernetesClient) GetConfigReturns(result1 *unstructured.Unstructured, result2 error) {
+func (fake *PkgKubernetesClient) GetConfigReturns(result1 *v1.Config, result2 error) {
 	fake.getConfigMutex.Lock()
 	defer fake.getConfigMutex.Unlock()
 	fake.GetConfigStub = nil
 	fake.getConfigReturns = struct {
-		result1 *unstructured.Unstructured
+		result1 *v1.Config
 		result2 error
 	}{result1, result2}
 }
 
-func (fake *PkgKubernetesClient) GetConfigReturnsOnCall(i int, result1 *unstructured.Unstructured, result2 error) {
+func (fake *PkgKubernetesClient) GetConfigReturnsOnCall(i int, result1 *v1.Config, result2 error) {
 	fake.getConfigMutex.Lock()
 	defer fake.getConfigMutex.Unlock()
 	fake.GetConfigStub = nil
 	if fake.getConfigReturnsOnCall == nil {
 		fake.getConfigReturnsOnCall = make(map[int]struct {
-			result1 *unstructured.Unstructured
+			result1 *v1.Config
 			result2 error
 		})
 	}
 	fake.getConfigReturnsOnCall[i] = struct {
-		result1 *unstructured.Unstructured
+		result1 *v1.Config
 		result2 error
 	}{result1, result2}
 }
 
-func (fake *PkgKubernetesClient) GetSecret(arg1 context.Context, arg2 string) (*v1a.Secret, error) {
+func (fake *PkgKubernetesClient) GetSecret(arg1 context.Context, arg2 string) (*v1b.Secret, error) {
 	fake.getSecretMutex.Lock()
 	ret, specificReturn := fake.getSecretReturnsOnCall[len(fake.getSecretArgsForCall)]
 	fake.getSecretArgsForCall = append(fake.getSecretArgsForCall, struct {
@@ -524,7 +524,7 @@ func (fake *PkgKubernetesClient) GetSecretCallCount() int {
 	return len(fake.getSecretArgsForCall)
 }
 
-func (fake *PkgKubernetesClient) GetSecretCalls(stub func(context.Context, string) (*v1a.Secret, error)) {
+func (fake *PkgKubernetesClient) GetSecretCalls(stub func(context.Context, string) (*v1b.Secret, error)) {
 	fake.getSecretMutex.Lock()
 	defer fake.getSecretMutex.Unlock()
 	fake.GetSecretStub = stub
@@ -537,33 +537,33 @@ func (fake *PkgKubernetesClient) GetSecretArgsForCall(i int) (context.Context, s
 	return argsForCall.arg1, argsForCall.arg2
 }
 
-func (fake *PkgKubernetesClient) GetSecretReturns(result1 *v1a.Secret, result2 error) {
+func (fake *PkgKubernetesClient) GetSecretReturns(result1 *v1b.Secret, result2 error) {
 	fake.getSecretMutex.Lock()
 	defer fake.getSecretMutex.Unlock()
 	fake.GetSecretStub = nil
 	fake.getSecretReturns = struct {
-		result1 *v1a.Secret
+		result1 *v1b.Secret
 		result2 error
 	}{result1, result2}
 }
 
-func (fake *PkgKubernetesClient) GetSecretReturnsOnCall(i int, result1 *v1a.Secret, result2 error) {
+func (fake *PkgKubernetesClient) GetSecretReturnsOnCall(i int, result1 *v1b.Secret, result2 error) {
 	fake.getSecretMutex.Lock()
 	defer fake.getSecretMutex.Unlock()
 	fake.GetSecretStub = nil
 	if fake.getSecretReturnsOnCall == nil {
 		fake.getSecretReturnsOnCall = make(map[int]struct {
-			result1 *v1a.Secret
+			result1 *v1b.Secret
 			result2 error
 		})
 	}
 	fake.getSecretReturnsOnCall[i] = struct {
-		result1 *v1a.Secret
+		result1 *v1b.Secret
 		result2 error
 	}{result1, result2}
 }
 
-func (fake *PkgKubernetesClient) ListConfigs(arg1 context.Context, arg2 string) ([]unstructured.Unstructured, error) {
+func (fake *PkgKubernetesClient) ListConfigs(arg1 context.Context, arg2 string) ([]v1.Config, error) {
 	fake.listConfigsMutex.Lock()
 	ret, specificReturn := fake.listConfigsReturnsOnCall[len(fake.listConfigsArgsForCall)]
 	fake.listConfigsArgsForCall = append(fake.listConfigsArgsForCall, struct {
@@ -589,7 +589,7 @@ func (fake *PkgKubernetesClient) ListConfigsCallCount() int {
 	return len(fake.listConfigsArgsForCall)
 }
 
-func (fake *PkgKubernetesClient) ListConfigsCalls(stub func(context.Context, string) ([]unstructured.Unstructured, error)) {
+func (fake *PkgKubernetesClient) ListConfigsCalls(stub func(context.Context, string) ([]v1.Config, error)) {
 	fake.listConfigsMutex.Lock()
 	defer fake.listConfigsMutex.Unlock()
 	fake.ListConfigsStub = stub
@@ -602,28 +602,28 @@ func (fake *PkgKubernetesClient) ListConfigsArgsForCall(i int) (context.Context,
 	return argsForCall.arg1, argsForCall.arg2
 }
 
-func (fake *PkgKubernetesClient) ListConfigsReturns(result1 []unstructured.Unstructured, result2 error) {
+func (fake *PkgKubernetesClient) ListConfigsReturns(result1 []v1.Config, result2 error) {
 	fake.listConfigsMutex.Lock()
 	defer fake.listConfigsMutex.Unlock()
 	fake.ListConfigsStub = nil
 	fake.listConfigsReturns = struct {
-		result1 []unstructured.Unstructured
+		result1 []v1.Config
 		result2 error
 	}{result1, result2}
 }
 
-func (fake *PkgKubernetesClient) ListConfigsReturnsOnCall(i int, result1 []unstructured.Unstructured, result2 error) {
+func (fake *PkgKubernetesClient) ListConfigsReturnsOnCall(i int, result1 []v1.Config, result2 error) {
 	fake.listConfigsMutex.Lock()
 	defer fake.listConfigsMutex.Unlock()
 	fake.ListConfigsStub = nil
 	if fake.listConfigsReturnsOnCall == nil {
 		fake.listConfigsReturnsOnCall = make(map[int]struct {
-			result1 []unstructured.Unstructured
+			result1 []v1.Config
 			result2 error
 		})
 	}
 	fake.listConfigsReturnsOnCall[i] = struct {
-		result1 []unstructured.Unstructured
+		result1 []v1.Config
 		result2 error
 	}{result1, result2}
 }
