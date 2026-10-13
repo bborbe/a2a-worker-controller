@@ -1,0 +1,510 @@
+// Copyright (c) 2026 Benjamin Borbe All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package pkg
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"net"
+	"os"
+	"os/exec"
+	"strconv"
+	"strings"
+
+	"github.com/bborbe/errors"
+)
+
+// The docker label scheme. Every worker container carries all three labels; the controller
+// label is what list and stop filter on, so a container without it is never touched.
+//
+// The keys deliberately contain no token, auth or secret: a label is readable by anyone who
+// can run `docker ps`, so no credential may ever travel in one.
+const (
+	// controllerLabel marks a container as one this controller owns. Its presence is the
+	// whole ownership rule — every read filters on it and every mutation resolves through it.
+	controllerLabel = "com.bborbe.a2a-worker-controller"
+	// controllerLabelValue is the controller label's constant identity value. It is the same
+	// on every worker: the key's presence is the identity, the value only has to be stable.
+	controllerLabelValue = "true"
+	// workerIDLabel carries the worker's id, read back on list so a worker survives a
+	// controller restart rather than being rebuilt from controller memory.
+	workerIDLabel = "com.bborbe.a2a-worker-controller.worker-id"
+	// taskLabel carries the vault task the worker serves. Create dedups on it, so a repeated
+	// create returns the existing worker instead of starting a second.
+	taskLabel = "com.bborbe.a2a-worker-controller.task"
+)
+
+// The worker container's fixed settings. They mirror the local-docker-run recipe the agent
+// image documents, which is the command create automates.
+const (
+	// DefaultDockerImage is the image every worker runs.
+	DefaultDockerImage = "bborbe/agent-claude"
+	// DefaultAgentNameBase prefixes the name each worker's Agent Card advertises; the worker
+	// id is appended so two workers never advertise the same name.
+	DefaultAgentNameBase = "claude-interactive"
+	// DefaultAnthropicModel is the model the worker's turns run against.
+	DefaultAnthropicModel = "MiniMax-M2.7-highspeed"
+	// DefaultAllowedTools is the tool allow-list the worker's agent runs with.
+	DefaultAllowedTools = "Read,Bash,Grep,Glob,Write,Edit,WebSearch,WebFetch"
+	// DefaultPortStart and DefaultPortEnd bound the host-port search. 9090 is commonly taken
+	// on a laptop and 9091/9092 are held by hand-started containers that are out of bounds,
+	// so the search starts above them.
+	DefaultPortStart = 9093
+	DefaultPortEnd   = 9199
+)
+
+// The container's own listen port. The host port is published onto it, so the container
+// always listens on the same port inside and the host port is the only thing that varies.
+const containerPort = 9090
+
+// The model router. Inside a container 127.0.0.1 is the container itself, so the router
+// running on the host is reached through the docker host gateway.
+const routerBaseURL = "http://host.docker.internal:8788"
+
+// tokenEnvName is the container's bearer-token variable. The run command names it bare and
+// the value travels in the child process's environment, so `ps` cannot read it.
+const tokenEnvName = "INTERACTIVE_AUTH_TOKEN"
+
+// The number of random bytes behind a worker id and behind a worker token.
+const (
+	workerIDBytes = 8
+	tokenBytes    = 24
+)
+
+// DockerConfig holds the docker backend's settings. It carries no credential: the token a
+// worker is created with is minted per worker and returned once.
+type DockerConfig struct {
+	// Image is the image every worker container runs.
+	Image string
+	// AgentNameBase prefixes the Agent Card name each worker advertises.
+	AgentNameBase string
+	// Model is the model the worker's turns run against.
+	Model string
+	// AllowedTools is the tool allow-list the worker's agent runs with.
+	AllowedTools string
+	// PortStart and PortEnd bound the host ports the backend will publish on.
+	PortStart int
+	PortEnd   int
+}
+
+// DefaultDockerConfig is the configuration the controller uses when none is supplied. Its
+// values are the local-docker-run recipe's own.
+func DefaultDockerConfig() DockerConfig {
+	return DockerConfig{
+		Image:         DefaultDockerImage,
+		AgentNameBase: DefaultAgentNameBase,
+		Model:         DefaultAnthropicModel,
+		AllowedTools:  DefaultAllowedTools,
+		PortStart:     DefaultPortStart,
+		PortEnd:       DefaultPortEnd,
+	}
+}
+
+// DockerClient runs one docker CLI invocation. It is the backend's only door to the daemon
+// and it is injected, so the backend reads no global and a test drives it with a fake that
+// records the argv and the environment it was handed and answers with canned output — no
+// daemon required.
+type DockerClient interface {
+	// Run runs docker with args and the extra environment, returning its standard output.
+	// The extra environment is layered on the caller's own and is where a credential
+	// travels, so the value never reaches argv.
+	Run(ctx context.Context, args []string, extraEnv []string) (string, error)
+}
+
+// execDockerClient is the DockerClient that shells out to the docker CLI.
+type execDockerClient struct{}
+
+var _ DockerClient = (*execDockerClient)(nil)
+
+// NewDockerCLIClient creates the DockerClient that runs the docker CLI.
+func NewDockerCLIClient() DockerClient {
+	return &execDockerClient{}
+}
+
+// Run runs the docker CLI. The child inherits this process's environment plus extraEnv, so a
+// bare `-e NAME` in args resolves to the value this process already holds rather than to
+// anything written on the command line.
+func (c *execDockerClient) Run(
+	ctx context.Context,
+	args []string,
+	extraEnv []string,
+) (string, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Env = append(os.Environ(), extraEnv...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		// args carries no credential by construction: every secret variable is named bare
+		// and its value travels in the environment, so this message is safe to emit.
+		return "", errors.Wrapf(
+			ctx,
+			err,
+			"docker %s failed: %s",
+			strings.Join(args, " "),
+			strings.TrimSpace(stderr.String()),
+		)
+	}
+	return stdout.String(), nil
+}
+
+// PortProber reports whether a host port is free to bind. It is injected so the port search
+// is testable without opening a socket.
+type PortProber interface {
+	// IsFree reports whether port can be bound on the host.
+	IsFree(ctx context.Context, port int) bool
+}
+
+// tcpPortProber is the PortProber that bind-checks a port on the host.
+type tcpPortProber struct{}
+
+var _ PortProber = (*tcpPortProber)(nil)
+
+// NewTCPPortProber creates the PortProber that bind-checks a port on the host.
+func NewTCPPortProber() PortProber {
+	return &tcpPortProber{}
+}
+
+// IsFree reports whether port can be bound. A successful bind is released immediately: the
+// port is not reserved, only proven free at the moment it was checked.
+func (p *tcpPortProber) IsFree(_ context.Context, port int) bool {
+	listener, err := net.Listen("tcp", ":"+strconv.Itoa(port))
+	if err != nil {
+		return false
+	}
+	_ = listener.Close()
+	return true
+}
+
+// dockerBackend runs each worker as a container on the local host. It is the only production
+// implementation of WorkerBackend that names docker; the schema, the executor and the
+// selection wiring stay backend-independent.
+//
+// It holds no state between calls. Every list reads the daemon and every create dedups
+// against it, so a controller restart loses nothing and a second controller sharing the
+// daemon sees the same workers.
+type dockerBackend struct {
+	client DockerClient
+	prober PortProber
+	config DockerConfig
+}
+
+var _ WorkerBackend = (*dockerBackend)(nil)
+
+// NewDockerBackend creates the WorkerBackend that runs each worker as a docker container.
+//
+// client is the backend's only door to the daemon and prober decides which host port is
+// free; both are injected, so the backend reads no global and a test drives it without a
+// daemon. config carries the image, the Agent Card name prefix, the model and the host-port
+// range.
+func NewDockerBackend(client DockerClient, prober PortProber, config DockerConfig) WorkerBackend {
+	return &dockerBackend{client: client, prober: prober, config: config}
+}
+
+// Create starts one worker container for the requested task and returns it with its own
+// freshly minted bearer token.
+//
+// A task that already has a container returns that container rather than starting a second,
+// so a repeated create never doubles a worker. The existing worker's token is not returned —
+// the controller kept no copy of it — so that reply carries the worker and an empty token; a
+// caller that has lost the credential stops the worker and creates another.
+func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateResponse, error) {
+	containers, err := b.listContainers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if existing := findContainerByTask(containers, req.Task); existing != nil {
+		return &CreateResponse{Worker: existing.worker(), Token: ""}, nil
+	}
+
+	port, err := b.freePort(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	workerID, err := newWorkerID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	token, err := newToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	args, env := createRun(b.config, workerID, req.Task, port, token)
+	if _, err := b.client.Run(ctx, args, env); err != nil {
+		return nil, errors.Wrap(ctx, err, "create worker container failed")
+	}
+
+	return &CreateResponse{
+		Worker: Worker{
+			WorkerID: workerID,
+			Task:     req.Task,
+			A2AURL:   a2aURLForPort(strconv.Itoa(port)),
+			Backend:  BackendDocker,
+			State:    WorkerStateRunning,
+		},
+		Token: token,
+	}, nil
+}
+
+// List returns every worker container this controller owns, rebuilt from the daemon on every
+// call. It reads no cached state, so a controller restart loses nothing, and it never
+// returns a container that lacks the controller label.
+func (b *dockerBackend) List(ctx context.Context) (*ListResponse, error) {
+	containers, err := b.listContainers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	workers := make([]Worker, 0, len(containers))
+	for _, container := range containers {
+		workers = append(workers, container.worker())
+	}
+	return &ListResponse{Workers: workers}, nil
+}
+
+// Stop stops and removes the worker container the request names, resolving ownership from
+// the container's own labels. A worker the controller does not own — or one that does not
+// exist — is refused with an error and left running, so a stop can never touch a container
+// this controller did not create.
+func (b *dockerBackend) Stop(ctx context.Context, req StopRequest) (*StopResponse, error) {
+	containers, err := b.listContainers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	container := findContainerByWorkerID(containers, req.WorkerID)
+	if container == nil {
+		return nil, errors.Errorf(ctx, "worker %q is not owned by this controller", req.WorkerID)
+	}
+	if _, err := b.client.Run(ctx, []string{"stop", container.Name}, nil); err != nil {
+		return nil, errors.Wrap(ctx, err, "stop worker container failed")
+	}
+	if _, err := b.client.Run(ctx, []string{"rm", container.Name}, nil); err != nil {
+		return nil, errors.Wrap(ctx, err, "remove worker container failed")
+	}
+	worker := container.worker()
+	worker.State = WorkerStateStopped
+	return &StopResponse{Worker: worker}, nil
+}
+
+// listContainers reads every running container that carries the controller label. The filter
+// is the whole ownership rule: a container without the label is never returned, so no other
+// call in this backend can reach one.
+func (b *dockerBackend) listContainers(ctx context.Context) ([]dockerContainer, error) {
+	stdout, err := b.client.Run(ctx, listArgs(), nil)
+	if err != nil {
+		return nil, errors.Wrap(ctx, err, "list worker containers failed")
+	}
+	return parseContainers(stdout), nil
+}
+
+// freePort returns the first free host port in the configured range. Each candidate is
+// bind-checked before it is offered, so a port another process already holds is skipped
+// rather than published on and lost.
+func (b *dockerBackend) freePort(ctx context.Context) (int, error) {
+	for port := b.config.PortStart; port <= b.config.PortEnd; port++ {
+		if b.prober.IsFree(ctx, port) {
+			return port, nil
+		}
+	}
+	return 0, errors.Errorf(
+		ctx,
+		"no free host port in range %d-%d",
+		b.config.PortStart,
+		b.config.PortEnd,
+	)
+}
+
+// listArgs is the docker ps invocation every read uses. The filter is the controller label,
+// so the daemon does the ownership filtering and the parser never sees a foreign container.
+func listArgs() []string {
+	return []string{
+		"ps",
+		"--filter", "label=" + controllerLabel,
+		"--no-trunc",
+		"--format", "{{.Names}}\t{{.Label \"" + workerIDLabel + "\"}}\t{{.Label \"" +
+			taskLabel + "\"}}\t{{.Ports}}",
+	}
+}
+
+// createRun builds the argv and the extra child environment for one worker's docker run.
+//
+// The token is a parameter and never an argument: the run command names INTERACTIVE_AUTH_TOKEN
+// bare, and the value is returned in the environment slice instead. The credential therefore
+// reaches the container through the client process's environment and can never be read back
+// out of `ps`. The model router's key is named bare the same way and resolves from this
+// process's own environment, so the controller never holds it either.
+func createRun(
+	config DockerConfig,
+	workerID WorkerID,
+	task TaskName,
+	port int,
+	token string,
+) ([]string, []string) {
+	args := []string{
+		"run", "-d",
+		"--name", containerName(workerID),
+		"--label", controllerLabel + "=" + controllerLabelValue,
+		"--label", workerIDLabel + "=" + string(workerID),
+		"--label", taskLabel + "=" + string(task),
+		"-p", strconv.Itoa(port) + ":" + strconv.Itoa(containerPort),
+		"-e", "AGENT_TYPE=service",
+		"-e", "LISTEN=:" + strconv.Itoa(containerPort),
+		"-e", "A2A_PUBLIC_URL=" + a2aURLForPort(strconv.Itoa(port)),
+		"-e", "A2A_AGENT_NAME=" + agentNameFor(config, workerID),
+		"-e", tokenEnvName,
+		"-e", "ANTHROPIC_BASE_URL=" + routerBaseURL,
+		"-e", "ANTHROPIC_AUTH_TOKEN",
+		"-e", "ANTHROPIC_MODEL=" + config.Model,
+		"-e", "ALLOWED_TOOLS=" + config.AllowedTools,
+		config.Image,
+	}
+	return args, []string{tokenEnvName + "=" + token}
+}
+
+// dockerContainer is one worker container as the daemon reports it. It holds no credential:
+// a token is never written to a label, so nothing here can carry one.
+type dockerContainer struct {
+	Name     string
+	WorkerID WorkerID
+	Task     TaskName
+	HostPort string
+}
+
+// worker renders the container as the control API's Worker shape. A container the daemon
+// reports is running by definition — list reads `docker ps` without --all — so its state is
+// running.
+func (c dockerContainer) worker() Worker {
+	return Worker{
+		WorkerID: c.WorkerID,
+		Task:     c.Task,
+		A2AURL:   a2aURLForPort(c.HostPort),
+		Backend:  BackendDocker,
+		State:    WorkerStateRunning,
+	}
+}
+
+// parseContainers reads one docker ps line per container. A line that does not carry both
+// the worker id and the task label is skipped: the filter should have excluded it, but a
+// partially labelled container must not become a half-built worker.
+func parseContainers(stdout string) []dockerContainer {
+	containers := make([]dockerContainer, 0)
+	for _, line := range strings.Split(stdout, "\n") {
+		fields := strings.Split(strings.TrimRight(line, "\r"), "\t")
+		if len(fields) != 4 {
+			continue
+		}
+		name := strings.TrimSpace(fields[0])
+		workerID := strings.TrimSpace(fields[1])
+		task := strings.TrimSpace(fields[2])
+		if name == "" || workerID == "" || task == "" {
+			continue
+		}
+		containers = append(containers, dockerContainer{
+			Name:     name,
+			WorkerID: WorkerID(workerID),
+			Task:     TaskName(task),
+			HostPort: hostPortFromPorts(fields[3]),
+		})
+	}
+	return containers
+}
+
+// hostPortFromPorts reads the host port a container publishes onto its own port out of a
+// docker ps Ports field: "0.0.0.0:9093->9090/tcp, :::9093->9090/tcp" yields "9093". It
+// returns an empty string when no mapping onto the container port is present.
+func hostPortFromPorts(ports string) string {
+	suffix := "->" + strconv.Itoa(containerPort) + "/tcp"
+	for _, mapping := range strings.Split(ports, ",") {
+		mapping = strings.TrimSpace(mapping)
+		if !strings.HasSuffix(mapping, suffix) {
+			continue
+		}
+		host := strings.TrimSuffix(mapping, suffix)
+		if index := strings.LastIndex(host, ":"); index >= 0 {
+			return host[index+1:]
+		}
+	}
+	return ""
+}
+
+// findContainerByTask returns the container serving task, or nil when none does. It is what
+// makes a repeated create a no-op rather than a second container.
+func findContainerByTask(containers []dockerContainer, task TaskName) *dockerContainer {
+	for index := range containers {
+		if containers[index].Task == task {
+			return &containers[index]
+		}
+	}
+	return nil
+}
+
+// findContainerByWorkerID returns the container carrying workerID, or nil when none does.
+// Ownership is resolved from the label alone, so a stop can only ever name a container this
+// controller created.
+func findContainerByWorkerID(
+	containers []dockerContainer,
+	workerID WorkerID,
+) *dockerContainer {
+	for index := range containers {
+		if containers[index].WorkerID == workerID {
+			return &containers[index]
+		}
+	}
+	return nil
+}
+
+// a2aURLForPort is the address a worker advertises, built from the host port it is published
+// on. A2A_PUBLIC_URL is configuration and is never derived from the container's listen
+// address, so the run command and this function must agree or every client posts to a dead
+// endpoint.
+func a2aURLForPort(port string) string {
+	if port == "" {
+		return ""
+	}
+	return "http://localhost:" + port + "/a2a"
+}
+
+// containerName is a worker's container name. It is derived from the worker id, which is
+// itself read back from the container's label, so the name survives a controller restart.
+func containerName(workerID WorkerID) string {
+	return "a2a-worker-" + string(workerID)
+}
+
+// agentNameFor is the name a worker's Agent Card advertises. The worker id is appended so
+// two workers never advertise the same name.
+func agentNameFor(config DockerConfig, workerID WorkerID) string {
+	return config.AgentNameBase + "-" + string(workerID)
+}
+
+// newWorkerID mints a worker id. It is random rather than derived from the task, so two
+// workers never collide on a name, and it is written to the container's label so list and
+// stop can read it back after a restart.
+func newWorkerID(ctx context.Context) (WorkerID, error) {
+	secret, err := newSecret(ctx, workerIDBytes, "worker id")
+	if err != nil {
+		return "", err
+	}
+	return WorkerID(secret), nil
+}
+
+// newToken mints one worker's bearer token. The value exists only in this call's return and
+// in the container's environment: it is never written to a label, a log or a file, and the
+// controller keeps no copy of it.
+func newToken(ctx context.Context) (string, error) {
+	return newSecret(ctx, tokenBytes, "worker token")
+}
+
+// newSecret returns n cryptographically random bytes as a lowercase hex string.
+func newSecret(ctx context.Context, n int, what string) (string, error) {
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", errors.Wrapf(ctx, err, "mint %s failed", what)
+	}
+	return hex.EncodeToString(buf), nil
+}
