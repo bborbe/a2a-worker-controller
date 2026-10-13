@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.6.1
 
 - fix: set each k8s worker Config's `taskType` to the worker's own name instead of clearing it — the field's JSON tag has no `omitempty`, so the cleared value was sent as `""`, which the `Config` CRD rejects (`spec.taskType` must match `^[a-z0-9-]+$`); every `create` on nuke dev failed with `spec.taskType: Invalid value: ""`. The worker's own name is valid and no vault task carries it, so nothing routes to the worker
 
