@@ -136,15 +136,37 @@ var _ = Describe("DockerBackend", func() {
 		})
 
 		It("lists first so a create dedups against the daemon", func() {
-			client := &fakeDockerClient{stdout: []string{"", ""}}
+			client := &fakeDockerClient{stdout: []string{"", "", ""}}
 			backend := pkg.NewDockerBackend(client, &fakePortProber{}, pkg.DefaultDockerConfig())
 
 			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
 
 			Expect(err).To(BeNil())
-			Expect(client.args).To(HaveLen(2))
+			Expect(client.args).To(HaveLen(3))
 			Expect(client.args[0]).To(ContainElement("ps"))
 			Expect(client.args[0]).To(ContainElement("label=" + testControllerLabel))
+			// The port search is the second read, and it must NOT be label-filtered: a host
+			// port can be held by a container this controller does not own, and a label
+			// filter would hide exactly those.
+			Expect(client.args[1]).To(ContainElement("ps"))
+			Expect(client.args[1]).To(ContainElement("{{.Ports}}"))
+			Expect(client.args[1]).NotTo(ContainElement(ContainSubstring("label=")))
+		})
+
+		// Without this the search returns its first candidate on every call. On macOS a bind
+		// check cannot see a port a running container has published — Docker Desktop
+		// forwards it in userspace — so the first create takes 9093 and every later create
+		// collides with it, after docker has already created the container.
+		It("skips a host port a running container already publishes", func() {
+			client := &fakeDockerClient{
+				stdout: []string{"", "0.0.0.0:9093->9090/tcp, [::]:9093->9090/tcp", ""},
+			}
+			backend := pkg.NewDockerBackend(client, &fakePortProber{}, pkg.DefaultDockerConfig())
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Worker.A2AURL).To(Equal("http://localhost:9094/a2a"))
 		})
 
 		It("labels the container with the controller identity, the worker id and the task", func() {
