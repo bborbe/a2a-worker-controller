@@ -53,6 +53,8 @@ spec:
                   name: a2a-worker-controller
             - name: SENTRY_PROXY
               value: '{{"SENTRY_PROXY_URL" | env}}'
+            - name: A2A_PUBLIC_URL
+              value: 'https://a2a-worker-controller.{{ "NAMESPACE" | env }}.quant.benjamin-borbe.de/a2a'
           image: '{{"DOCKER_REGISTRY" | env}}/a2a-worker-controller:{{"BRANCH" | env}}'
           imagePullPolicy: Always
           livenessProbe:

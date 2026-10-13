@@ -9,6 +9,7 @@ run:
 	@go run -mod=mod main.go \
 	-sentry-dsn="$(shell teamvault-url --teamvault-config ~/.teamvault.json --teamvault-key=${SENTRY_DSN_KEY})" \
 	-listen="localhost:${A2A_WORKER_CONTROLLER_PORT}" \
+	-a2a-public-url="http://localhost:${A2A_WORKER_CONTROLLER_PORT}${A2A_PATH}" \
 	-v=2
 
 deps:

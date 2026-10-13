@@ -3,6 +3,8 @@ module github.com/bborbe/a2a-worker-controller
 go 1.27.2
 
 require (
+	github.com/a2aproject/a2a-go/v2 v2.6.0
+	github.com/bborbe/errors v1.6.0
 	github.com/bborbe/http v1.26.25
 	github.com/bborbe/log v1.6.25
 	github.com/bborbe/metrics v0.6.1
@@ -19,7 +21,6 @@ require (
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/bborbe/argument/v2 v2.13.2 // indirect
 	github.com/bborbe/collection v1.20.26 // indirect
-	github.com/bborbe/errors v1.6.0 // indirect
 	github.com/bborbe/kv v1.21.13 // indirect
 	github.com/bborbe/math v1.4.8 // indirect
 	github.com/bborbe/parse v1.11.1 // indirect
@@ -33,6 +34,7 @@ require (
 	github.com/golang/glog v1.2.5 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20260903180319-d6c3cb2f37ec // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
