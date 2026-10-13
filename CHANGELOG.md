@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: add the k8s backend — `BACKEND=k8s` runs each worker as a per-task pod by writing one `type: service` agent `Config` the executor reconciles into a StatefulSet, cloned from a live template Config (`WORKER_TEMPLATE`, default `claude-interactive`) so the image pin and priority class stay where the chart keeps them, with the template's `trigger` and `taskTypes` removed so the executor never routes vault tasks to a worker; each worker gets its own token Secret (the template Secret's keys with `INTERACTIVE_AUTH_TOKEN` replaced), ClusterIP Service and TLS Ingress on `<worker>.<INGRESS_DOMAIN>`, all owned by its Config, so `stop` is one Config delete the garbage collector completes; `list` is rebuilt from Configs carrying the controller label and never returns one the chart rendered
+- chore: add `k8s.io/{api,apimachinery,client-go}` v0.36.4 and exclude v0.37.0, matching agent-task-executor
+
 ## v0.4.4
 
 - docs: replace the boilerplate README with an accurate recipe — the Usage block documented `-kafka-brokers` and `-datadir`, neither of which this controller has, and omitted every required flag; the README now lists the real configuration, the control API's request and reply shapes, the ownership labels, and the `ANTHROPIC_AUTH_TOKEN` requirement whose absence lets a worker start and serve its Agent Card while answering `Not logged in` to every turn
