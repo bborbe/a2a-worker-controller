@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.1.0
 
 - feat: initial service scaffold
 - feat: define the backend-independent control API (`create` / `list` / `stop`)
