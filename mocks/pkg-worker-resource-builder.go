@@ -46,6 +46,17 @@ type PkgWorkerResourceBuilder struct {
 	buildIngressReturnsOnCall map[int]struct {
 		result1 *v1a.Ingress
 	}
+	BuildNetworkPolicyStub        func(v1.Config) *v1a.NetworkPolicy
+	buildNetworkPolicyMutex       sync.RWMutex
+	buildNetworkPolicyArgsForCall []struct {
+		arg1 v1.Config
+	}
+	buildNetworkPolicyReturns struct {
+		result1 *v1a.NetworkPolicy
+	}
+	buildNetworkPolicyReturnsOnCall map[int]struct {
+		result1 *v1a.NetworkPolicy
+	}
 	BuildSecretStub        func(v1.Config, v1b.Secret, string) *v1b.Secret
 	buildSecretMutex       sync.RWMutex
 	buildSecretArgsForCall []struct {
@@ -256,6 +267,67 @@ func (fake *PkgWorkerResourceBuilder) BuildIngressReturnsOnCall(i int, result1 *
 	}
 	fake.buildIngressReturnsOnCall[i] = struct {
 		result1 *v1a.Ingress
+	}{result1}
+}
+
+func (fake *PkgWorkerResourceBuilder) BuildNetworkPolicy(arg1 v1.Config) *v1a.NetworkPolicy {
+	fake.buildNetworkPolicyMutex.Lock()
+	ret, specificReturn := fake.buildNetworkPolicyReturnsOnCall[len(fake.buildNetworkPolicyArgsForCall)]
+	fake.buildNetworkPolicyArgsForCall = append(fake.buildNetworkPolicyArgsForCall, struct {
+		arg1 v1.Config
+	}{arg1})
+	stub := fake.BuildNetworkPolicyStub
+	fakeReturns := fake.buildNetworkPolicyReturns
+	fake.recordInvocation("BuildNetworkPolicy", []interface{}{arg1})
+	fake.buildNetworkPolicyMutex.Unlock()
+	if stub != nil {
+		return stub(arg1)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *PkgWorkerResourceBuilder) BuildNetworkPolicyCallCount() int {
+	fake.buildNetworkPolicyMutex.RLock()
+	defer fake.buildNetworkPolicyMutex.RUnlock()
+	return len(fake.buildNetworkPolicyArgsForCall)
+}
+
+func (fake *PkgWorkerResourceBuilder) BuildNetworkPolicyCalls(stub func(v1.Config) *v1a.NetworkPolicy) {
+	fake.buildNetworkPolicyMutex.Lock()
+	defer fake.buildNetworkPolicyMutex.Unlock()
+	fake.BuildNetworkPolicyStub = stub
+}
+
+func (fake *PkgWorkerResourceBuilder) BuildNetworkPolicyArgsForCall(i int) v1.Config {
+	fake.buildNetworkPolicyMutex.RLock()
+	defer fake.buildNetworkPolicyMutex.RUnlock()
+	argsForCall := fake.buildNetworkPolicyArgsForCall[i]
+	return argsForCall.arg1
+}
+
+func (fake *PkgWorkerResourceBuilder) BuildNetworkPolicyReturns(result1 *v1a.NetworkPolicy) {
+	fake.buildNetworkPolicyMutex.Lock()
+	defer fake.buildNetworkPolicyMutex.Unlock()
+	fake.BuildNetworkPolicyStub = nil
+	fake.buildNetworkPolicyReturns = struct {
+		result1 *v1a.NetworkPolicy
+	}{result1}
+}
+
+func (fake *PkgWorkerResourceBuilder) BuildNetworkPolicyReturnsOnCall(i int, result1 *v1a.NetworkPolicy) {
+	fake.buildNetworkPolicyMutex.Lock()
+	defer fake.buildNetworkPolicyMutex.Unlock()
+	fake.BuildNetworkPolicyStub = nil
+	if fake.buildNetworkPolicyReturnsOnCall == nil {
+		fake.buildNetworkPolicyReturnsOnCall = make(map[int]struct {
+			result1 *v1a.NetworkPolicy
+		})
+	}
+	fake.buildNetworkPolicyReturnsOnCall[i] = struct {
+		result1 *v1a.NetworkPolicy
 	}{result1}
 }
 

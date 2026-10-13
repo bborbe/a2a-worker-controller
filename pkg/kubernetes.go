@@ -41,6 +41,9 @@ type KubernetesConfig struct {
 	IngressClassName string
 	// TLSSecretName names the wildcard certificate Secret covering IngressDomain.
 	TLSSecretName string
+	// EgressAllow lists the in-cluster destinations each worker's NetworkPolicy allows, on top
+	// of DNS. Everything else — the public internet included — is denied.
+	EgressAllow []EgressDestination
 }
 
 // DefaultKubernetesConfig is the k8s backend's configuration before the deployment-specific
@@ -75,6 +78,8 @@ type KubernetesClient interface {
 	CreateService(ctx context.Context, service *corev1.Service) error
 	// CreateIngress creates ingress.
 	CreateIngress(ctx context.Context, ingress *networkingv1.Ingress) error
+	// CreateNetworkPolicy creates policy.
+	CreateNetworkPolicy(ctx context.Context, policy *networkingv1.NetworkPolicy) error
 }
 
 // kubernetesBackend runs each worker as a per-task pod in the cluster. It writes one
@@ -193,13 +198,21 @@ func (b *kubernetesBackend) Create(
 	return &CreateResponse{Worker: b.workerFor(*created), Token: token}, nil
 }
 
-// createChildren writes the worker's token Secret, Service and Ingress, each owned by owner.
+// createChildren writes the worker's NetworkPolicy, token Secret, Service and Ingress, each
+// owned by owner.
+//
+// The NetworkPolicy is written before the Secret on purpose. The pod cannot start until its
+// envFrom Secret exists, so a policy that lands first is in force before the worker's first
+// connection — there is no window in which a worker runs with unrestricted egress.
 func (b *kubernetesBackend) createChildren(
 	ctx context.Context,
 	owner agentv1.Config,
 	templateSecret corev1.Secret,
 	token string,
 ) error {
+	if err := b.client.CreateNetworkPolicy(ctx, b.builder.BuildNetworkPolicy(owner)); err != nil {
+		return errors.Wrap(ctx, err, "create worker network policy failed")
+	}
 	if err := b.client.CreateSecret(ctx, b.builder.BuildSecret(owner, templateSecret, token)); err != nil {
 		return errors.Wrap(ctx, err, "create worker secret failed")
 	}

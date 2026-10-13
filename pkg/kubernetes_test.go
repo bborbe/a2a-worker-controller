@@ -92,6 +92,7 @@ var _ = Describe("KubernetesBackend", func() {
 			Expect(client.CreateSecretCallCount()).To(Equal(1))
 			Expect(client.CreateServiceCallCount()).To(Equal(1))
 			Expect(client.CreateIngressCallCount()).To(Equal(1))
+			Expect(client.CreateNetworkPolicyCallCount()).To(Equal(1))
 			Expect(client.DeleteConfigCallCount()).To(Equal(0))
 		})
 
@@ -126,7 +127,8 @@ var _ = Describe("KubernetesBackend", func() {
 			_, secret := client.CreateSecretArgsForCall(0)
 			_, service := client.CreateServiceArgsForCall(0)
 			_, ingress := client.CreateIngressArgsForCall(0)
-			for _, object := range []metav1.Object{secret, service, ingress} {
+			_, policy := client.CreateNetworkPolicyArgsForCall(0)
+			for _, object := range []metav1.Object{secret, service, ingress, policy} {
 				Expect(object.GetOwnerReferences()).To(HaveLen(1))
 				Expect(object.GetOwnerReferences()[0].UID).To(Equal(testCreatedUID))
 			}
@@ -158,6 +160,18 @@ var _ = Describe("KubernetesBackend", func() {
 			It("refuses before writing anything", func() {
 				Expect(err).NotTo(BeNil())
 				Expect(client.CreateConfigCallCount()).To(Equal(0))
+			})
+		})
+
+		Context("when writing the network policy fails", func() {
+			BeforeEach(func() {
+				client.CreateNetworkPolicyReturns(errCluster)
+			})
+
+			It("never writes the Secret, so no worker pod can start unconfined", func() {
+				Expect(err).NotTo(BeNil())
+				Expect(client.CreateSecretCallCount()).To(Equal(0))
+				Expect(client.DeleteConfigCallCount()).To(Equal(1))
 			})
 		})
 

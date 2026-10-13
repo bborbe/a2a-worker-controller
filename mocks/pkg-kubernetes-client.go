@@ -38,6 +38,18 @@ type PkgKubernetesClient struct {
 	createIngressReturnsOnCall map[int]struct {
 		result1 error
 	}
+	CreateNetworkPolicyStub        func(context.Context, *v1a.NetworkPolicy) error
+	createNetworkPolicyMutex       sync.RWMutex
+	createNetworkPolicyArgsForCall []struct {
+		arg1 context.Context
+		arg2 *v1a.NetworkPolicy
+	}
+	createNetworkPolicyReturns struct {
+		result1 error
+	}
+	createNetworkPolicyReturnsOnCall map[int]struct {
+		result1 error
+	}
 	CreateSecretStub        func(context.Context, *v1b.Secret) error
 	createSecretMutex       sync.RWMutex
 	createSecretArgsForCall []struct {
@@ -243,6 +255,68 @@ func (fake *PkgKubernetesClient) CreateIngressReturnsOnCall(i int, result1 error
 		})
 	}
 	fake.createIngressReturnsOnCall[i] = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *PkgKubernetesClient) CreateNetworkPolicy(arg1 context.Context, arg2 *v1a.NetworkPolicy) error {
+	fake.createNetworkPolicyMutex.Lock()
+	ret, specificReturn := fake.createNetworkPolicyReturnsOnCall[len(fake.createNetworkPolicyArgsForCall)]
+	fake.createNetworkPolicyArgsForCall = append(fake.createNetworkPolicyArgsForCall, struct {
+		arg1 context.Context
+		arg2 *v1a.NetworkPolicy
+	}{arg1, arg2})
+	stub := fake.CreateNetworkPolicyStub
+	fakeReturns := fake.createNetworkPolicyReturns
+	fake.recordInvocation("CreateNetworkPolicy", []interface{}{arg1, arg2})
+	fake.createNetworkPolicyMutex.Unlock()
+	if stub != nil {
+		return stub(arg1, arg2)
+	}
+	if specificReturn {
+		return ret.result1
+	}
+	return fakeReturns.result1
+}
+
+func (fake *PkgKubernetesClient) CreateNetworkPolicyCallCount() int {
+	fake.createNetworkPolicyMutex.RLock()
+	defer fake.createNetworkPolicyMutex.RUnlock()
+	return len(fake.createNetworkPolicyArgsForCall)
+}
+
+func (fake *PkgKubernetesClient) CreateNetworkPolicyCalls(stub func(context.Context, *v1a.NetworkPolicy) error) {
+	fake.createNetworkPolicyMutex.Lock()
+	defer fake.createNetworkPolicyMutex.Unlock()
+	fake.CreateNetworkPolicyStub = stub
+}
+
+func (fake *PkgKubernetesClient) CreateNetworkPolicyArgsForCall(i int) (context.Context, *v1a.NetworkPolicy) {
+	fake.createNetworkPolicyMutex.RLock()
+	defer fake.createNetworkPolicyMutex.RUnlock()
+	argsForCall := fake.createNetworkPolicyArgsForCall[i]
+	return argsForCall.arg1, argsForCall.arg2
+}
+
+func (fake *PkgKubernetesClient) CreateNetworkPolicyReturns(result1 error) {
+	fake.createNetworkPolicyMutex.Lock()
+	defer fake.createNetworkPolicyMutex.Unlock()
+	fake.CreateNetworkPolicyStub = nil
+	fake.createNetworkPolicyReturns = struct {
+		result1 error
+	}{result1}
+}
+
+func (fake *PkgKubernetesClient) CreateNetworkPolicyReturnsOnCall(i int, result1 error) {
+	fake.createNetworkPolicyMutex.Lock()
+	defer fake.createNetworkPolicyMutex.Unlock()
+	fake.CreateNetworkPolicyStub = nil
+	if fake.createNetworkPolicyReturnsOnCall == nil {
+		fake.createNetworkPolicyReturnsOnCall = make(map[int]struct {
+			result1 error
+		})
+	}
+	fake.createNetworkPolicyReturnsOnCall[i] = struct {
 		result1 error
 	}{result1}
 }

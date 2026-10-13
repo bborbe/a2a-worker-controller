@@ -136,3 +136,16 @@ func (c *kubernetesClient) CreateIngress(ctx context.Context, ingress *networkin
 	}
 	return nil
 }
+
+// CreateNetworkPolicy creates policy.
+func (c *kubernetesClient) CreateNetworkPolicy(
+	ctx context.Context,
+	policy *networkingv1.NetworkPolicy,
+) error {
+	if _, err := c.clientset.NetworkingV1().
+		NetworkPolicies(c.namespace).
+		Create(ctx, policy, metav1.CreateOptions{}); err != nil {
+		return errors.Wrapf(ctx, err, "create network policy %s failed", policy.Name)
+	}
+	return nil
+}
