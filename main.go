@@ -36,6 +36,7 @@ type application struct {
 	Backend         string `required:"false" arg:"backend"           env:"BACKEND"           usage:"backend serving workers"                                                default:"docker"`
 	A2APublicURL    string `required:"true"  arg:"a2a-public-url"    env:"A2A_PUBLIC_URL"    usage:"externally reachable A2A endpoint the card advertises"`
 	A2AAgentName    string `required:"false" arg:"a2a-agent-name"    env:"A2A_AGENT_NAME"    usage:"agent name the Agent Card advertises"                                   default:"a2a-worker-controller"`
+	A2AAuthToken    string `required:"true"  arg:"a2a-auth-token"    env:"A2A_AUTH_TOKEN"    usage:"bearer token every gated request must present"         display:"length"`
 	BuildGitVersion string `required:"false" arg:"build-git-version" env:"BUILD_GIT_VERSION" usage:"Build Git version"                                                      default:"dev"`
 	BuildGitCommit  string `required:"false" arg:"build-git-commit"  env:"BUILD_GIT_COMMIT"  usage:"Build Git commit hash"                                                  default:"none"`
 }
@@ -89,10 +90,14 @@ func (a *application) createHTTPServer() run.Func {
 			})))
 		router.Path(pkg.A2APath).Handler(pkg.NewA2AHandler(executor))
 
+		// The gate wraps the whole router, so /a2a and every route registered after this
+		// point are covered by construction rather than by remembering to add it. It is
+		// built from a required token, so a controller that cannot authenticate refuses to
+		// start rather than serving a surface that creates and destroys containers.
 		slog.Info("starting http server", "listen", a.Listen)
 		return libhttp.NewServer(
 			a.Listen,
-			router,
+			pkg.NewAuthToken(a.A2AAuthToken).Wrap(router),
 		).Run(ctx)
 	}
 }

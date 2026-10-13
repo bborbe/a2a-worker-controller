@@ -55,6 +55,11 @@ spec:
               value: '{{"SENTRY_PROXY_URL" | env}}'
             - name: A2A_PUBLIC_URL
               value: 'https://a2a-worker-controller.{{ "NAMESPACE" | env }}.quant.benjamin-borbe.de/a2a'
+            - name: A2A_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: a2a-auth-token
+                  name: a2a-worker-controller
           image: '{{"DOCKER_REGISTRY" | env}}/a2a-worker-controller:{{"BRANCH" | env}}'
           imagePullPolicy: Always
           livenessProbe:
