@@ -1,6 +1,6 @@
 module github.com/bborbe/a2a-worker-controller
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/bborbe/http v1.26.25
