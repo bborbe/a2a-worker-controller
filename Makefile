@@ -9,9 +9,6 @@ run:
 	@go run -mod=mod main.go \
 	-sentry-dsn="$(shell teamvault-url --teamvault-config ~/.teamvault.json --teamvault-key=${SENTRY_DSN_KEY})" \
 	-listen="localhost:${A2A_WORKER_CONTROLLER_PORT}" \
-	-kafka-brokers="${KAFKA_BROKERS}" \
-	-datadir="data" \
-	-batch-size="100" \
 	-v=2
 
 deps:
