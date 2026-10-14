@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.8.0
 
 - feat: let an `EGRESS_ALLOW` entry name a pod label — `namespace/key=value:port` narrows the rule to pods carrying that label, inside that namespace only. A plain `namespace:port` stays namespace-wide. Needed because on nuke `dev` port 9090 is served by the vault writers and the trading gateways alike, so `dev:9090` would let a worker reach the broker gateways; `dev/app=vault-obsidian-personal:9090` opens the personal vault writer alone. A malformed label is refused, never dropped.
 
