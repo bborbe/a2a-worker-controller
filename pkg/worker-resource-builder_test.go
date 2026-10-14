@@ -41,6 +41,11 @@ func testKubernetesConfig() pkg.KubernetesConfig {
 	config.EgressAllow = []pkg.EgressDestination{
 		{Namespace: "dev", Port: 8788},
 		{Namespace: "monitoring", Port: 9090},
+		{
+			Namespace: "dev",
+			PodLabels: map[string]string{"app": "vault-obsidian-personal"},
+			Port:      9090,
+		},
 	}
 	return config
 }
@@ -308,8 +313,20 @@ var _ = Describe("WorkerResourceBuilder", func() {
 			Expect(*dns.Ports[1].Protocol).To(Equal(corev1.ProtocolTCP))
 		})
 
+		It("narrows a label-scoped destination to its pods, inside its namespace only", func() {
+			rule := policy.Spec.Egress[3]
+			Expect(rule.To).To(HaveLen(1))
+			Expect(rule.To[0].NamespaceSelector.MatchLabels).To(HaveKeyWithValue(
+				"kubernetes.io/metadata.name", "dev",
+			))
+			Expect(rule.To[0].PodSelector.MatchLabels).To(Equal(map[string]string{
+				"app": "vault-obsidian-personal",
+			}))
+			Expect(rule.Ports[0].Port.IntVal).To(BeEquivalentTo(9090))
+		})
+
 		It("allows each configured destination and nothing else", func() {
-			Expect(policy.Spec.Egress).To(HaveLen(3))
+			Expect(policy.Spec.Egress).To(HaveLen(4))
 			for i, want := range []struct {
 				namespace string
 				port      int32
@@ -319,6 +336,7 @@ var _ = Describe("WorkerResourceBuilder", func() {
 				Expect(rule.To[0].NamespaceSelector.MatchLabels).To(HaveKeyWithValue(
 					"kubernetes.io/metadata.name", want.namespace,
 				))
+				Expect(rule.To[0].PodSelector).To(BeNil())
 				Expect(rule.Ports).To(HaveLen(1))
 				Expect(*rule.Ports[0].Protocol).To(Equal(corev1.ProtocolTCP))
 				Expect(rule.Ports[0].Port.IntVal).To(Equal(want.port))

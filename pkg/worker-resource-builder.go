@@ -223,7 +223,7 @@ func (b *workerResourceBuilder) BuildNetworkPolicy(
 	for _, destination := range b.config.EgressAllow {
 		port := intstr.FromInt32(destination.Port)
 		rules = append(rules, networkingv1.NetworkPolicyEgressRule{
-			To:    []networkingv1.NetworkPolicyPeer{namespacePeer(destination.Namespace)},
+			To:    []networkingv1.NetworkPolicyPeer{destinationPeer(destination)},
 			Ports: []networkingv1.NetworkPolicyPort{{Protocol: &tcp, Port: &port}},
 		})
 	}
@@ -237,6 +237,17 @@ func (b *workerResourceBuilder) BuildNetworkPolicy(
 			Egress:      rules,
 		},
 	}
+}
+
+// destinationPeer selects destination's pods: every pod in its namespace, narrowed to those
+// carrying its PodLabels when it names any. Namespace and pod selector sit in one peer, so the
+// two are ANDed — a pod with the label in another namespace does not match.
+func destinationPeer(destination EgressDestination) networkingv1.NetworkPolicyPeer {
+	peer := namespacePeer(destination.Namespace)
+	if len(destination.PodLabels) > 0 {
+		peer.PodSelector = &metav1.LabelSelector{MatchLabels: destination.PodLabels}
+	}
+	return peer
 }
 
 // namespacePeer selects every pod in namespace, by the name label Kubernetes stamps on each

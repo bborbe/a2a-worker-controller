@@ -29,6 +29,22 @@ var _ = Describe("ParseEgressDestinations", func() {
 		}))
 	})
 
+	It("parses a pod-label-scoped destination", func() {
+		destinations, err := pkg.ParseEgressDestinations(
+			ctx,
+			"dev:8788,dev/app=vault-obsidian-personal:9090",
+		)
+		Expect(err).To(BeNil())
+		Expect(destinations).To(Equal([]pkg.EgressDestination{
+			{Namespace: "dev", Port: 8788},
+			{
+				Namespace: "dev",
+				PodLabels: map[string]string{"app": "vault-obsidian-personal"},
+				Port:      9090,
+			},
+		}))
+	})
+
 	It("reads an empty value as no destinations", func() {
 		destinations, err := pkg.ParseEgressDestinations(ctx, "")
 		Expect(err).To(BeNil())
@@ -45,5 +61,8 @@ var _ = Describe("ParseEgressDestinations", func() {
 		Entry("port not a number", "dev:http"),
 		Entry("port zero", "dev:0"),
 		Entry("port out of range", "dev:70000"),
+		Entry("label without value", "dev/app=:9090"),
+		Entry("label without key", "dev/=vault:9090"),
+		Entry("label without equals", "dev/app:9090"),
 	)
 })
