@@ -74,6 +74,16 @@ type ControlRequest struct {
 // CreateRequest asks for a worker serving one task.
 type CreateRequest struct {
 	Task TaskName `json:"task"`
+	// Env carries extra environment for the worker, keyed by variable name. It is how a
+	// caller hands a worker the settings its own tooling needs — the attention store's URL
+	// and token, for instance.
+	//
+	// ⚠️ Every entry travels through the child environment, never in argv, because the
+	// controller cannot tell a credential from a plain setting and create is a public
+	// surface. A name colliding with one of the controller's own settings is refused rather
+	// than merged: silently overriding AGENT_TYPE would start a worker outside the gated
+	// service path, which is the setting its permission gate depends on.
+	Env map[string]string `json:"env,omitempty"`
 }
 
 // CreateResponse is the reply to a create. It is the only place a worker's token is ever

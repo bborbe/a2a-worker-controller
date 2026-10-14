@@ -105,6 +105,28 @@ func runCallIndex(calls [][]string) int {
 	return -1
 }
 
+// callerEnvNames returns the bare `-e` names a create request supplied, in the order they
+// appear. The controller's own bare names are excluded, so the result is the caller's entries
+// alone — which is what the determinism assertion is about.
+func callerEnvNames(args []string) []string {
+	controllerOwned := map[string]bool{
+		testTokenEnvName:       true,
+		"ANTHROPIC_AUTH_TOKEN": true,
+	}
+	names := make([]string, 0)
+	for index := 0; index < len(args)-1; index++ {
+		if args[index] != "-e" {
+			continue
+		}
+		name := args[index+1]
+		if strings.Contains(name, "=") || controllerOwned[name] {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
 var _ = Describe("DockerBackend", func() {
 	var ctx context.Context
 
@@ -224,6 +246,91 @@ var _ = Describe("DockerBackend", func() {
 			// The value travels in the child's environment instead.
 			Expect(client.extraEnv[runIndex]).
 				To(Equal([]string{testTokenEnvName + "=" + response.Token}))
+		})
+
+		It("carries caller-supplied environment, named bare on the command line", func() {
+			client := &fakeDockerClient{stdout: []string{"", ""}}
+			backend := pkg.NewDockerBackend(client, &fakePortProber{}, pkg.DefaultDockerConfig())
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{
+				Task: task,
+				Env: map[string]string{
+					"POD_ATTENTION_STORE_URL": "http://host.docker.internal:18081",
+					"POD_ATTENTION_TOKEN":     "a-worker-token",
+				},
+			})
+
+			Expect(err).To(BeNil())
+			runIndex := runCallIndex(client.args)
+			Expect(runIndex).NotTo(Equal(-1))
+			run := client.args[runIndex]
+
+			// Named bare on the command line, so a caller's value is never readable in `ps`.
+			// The store URL is not a credential, but it travels the same way: the controller
+			// cannot tell which entries are sensitive, so none of them may reach argv.
+			Expect(containsBareEnv(run, "POD_ATTENTION_STORE_URL")).To(BeTrue())
+			Expect(containsBareEnv(run, "POD_ATTENTION_TOKEN")).To(BeTrue())
+			joined := strings.Join(run, " ")
+			Expect(joined).NotTo(ContainSubstring("a-worker-token"))
+			Expect(joined).NotTo(ContainSubstring("host.docker.internal:18081"))
+
+			// The values travel in the child's environment instead, after the token.
+			Expect(client.extraEnv[runIndex]).To(Equal([]string{
+				testTokenEnvName + "=" + response.Token,
+				"POD_ATTENTION_STORE_URL=http://host.docker.internal:18081",
+				"POD_ATTENTION_TOKEN=a-worker-token",
+			}))
+		})
+
+		It("orders caller-supplied environment keys, so the command line is deterministic", func() {
+			client := &fakeDockerClient{stdout: []string{"", ""}}
+			backend := pkg.NewDockerBackend(client, &fakePortProber{}, pkg.DefaultDockerConfig())
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{
+				Task: task,
+				Env: map[string]string{
+					"ZULU":  "1",
+					"ALPHA": "2",
+					"MIKE":  "3",
+					"BRAVO": "4",
+				},
+			})
+
+			Expect(err).To(BeNil())
+			run := client.args[runCallIndex(client.args)]
+			Expect(callerEnvNames(run)).To(Equal([]string{"ALPHA", "BRAVO", "MIKE", "ZULU"}))
+		})
+
+		It("refuses a caller-supplied name the controller sets itself", func() {
+			client := &fakeDockerClient{stdout: []string{"", ""}}
+			backend := pkg.NewDockerBackend(client, &fakePortProber{}, pkg.DefaultDockerConfig())
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{
+				Task: task,
+				// AGENT_TYPE selects the agent's shape. A caller free to overwrite it could
+				// start a worker outside the service path, where no permission decider is
+				// wired and the gate the whole feature exists for silently disappears.
+				Env: map[string]string{"AGENT_TYPE": "headless"},
+			})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("AGENT_TYPE"))
+			// Refused before any container was started, not after.
+			Expect(runCallIndex(client.args)).To(Equal(-1))
+		})
+
+		It("refuses a caller-supplied name that collides with the worker's own token", func() {
+			client := &fakeDockerClient{stdout: []string{"", ""}}
+			backend := pkg.NewDockerBackend(client, &fakePortProber{}, pkg.DefaultDockerConfig())
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{
+				Task: task,
+				Env:  map[string]string{testTokenEnvName: "an-attacker-chosen-token"},
+			})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring(testTokenEnvName))
+			Expect(runCallIndex(client.args)).To(Equal(-1))
 		})
 
 		It("publishes on the first free host port, skipping the ones already bound", func() {

@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -229,6 +230,12 @@ func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateR
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
+	// Refused before any work, so a request carrying a reserved name fails fast rather than
+	// after a port and a token have been minted for a worker that will not start.
+	if err := validateExtraEnv(ctx, req.Env); err != nil {
+		return nil, err
+	}
+
 	containers, err := b.listContainers(ctx)
 	if err != nil {
 		return nil, err
@@ -252,7 +259,7 @@ func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateR
 		return nil, err
 	}
 
-	args, env := createRun(b.config, workerID, req.Task, port, token)
+	args, env := createRun(b.config, workerID, req.Task, port, token, req.Env)
 	if _, err := b.client.Run(ctx, args, env); err != nil {
 		return nil, errors.Wrap(ctx, err, "create worker container failed")
 	}
@@ -414,14 +421,20 @@ func listArgs() []string {
 // reaches the container through the client process's environment and can never be read back
 // out of `ps`. The model router's key is named bare the same way and resolves from this
 // process's own environment, so the controller never holds it either.
+//
+// Caller-supplied entries follow that same rule, deliberately: the controller cannot tell a
+// credential from a plain setting, and create is a public surface, so every entry the caller
+// sends is named bare in argv and carried by the child environment. Nothing a caller passes
+// can be read back out of `ps`.
 func createRun(
 	config DockerConfig,
 	workerID WorkerID,
 	task TaskName,
 	port int,
 	token string,
+	extraEnv map[string]string,
 ) ([]string, []string) {
-	args := []string{
+	baseArgs := []string{
 		"run", "-d",
 		"--name", containerName(workerID),
 		"--label", controllerLabel + "=" + controllerLabelValue,
@@ -437,9 +450,67 @@ func createRun(
 		"-e", "ANTHROPIC_AUTH_TOKEN",
 		"-e", "ANTHROPIC_MODEL=" + config.Model,
 		"-e", "ALLOWED_TOOLS=" + config.AllowedTools,
-		config.Image,
 	}
-	return args, []string{tokenEnvName + "=" + token}
+	// Both slices are sized up front rather than grown: each extra entry contributes one bare
+	// `-e NAME` pair to the argv, and the image closes it.
+	args := make([]string, 0, len(baseArgs)+2*len(extraEnv)+1)
+	args = append(args, baseArgs...)
+	childEnv := make([]string, 0, 1+len(extraEnv))
+	childEnv = append(childEnv, tokenEnvName+"="+token)
+	// Sorted, because ranging a map in Go is deliberately randomised: an unsorted argv would
+	// make two identical creates produce different command lines, which no test could assert.
+	for _, key := range sortedKeys(extraEnv) {
+		args = append(args, "-e", key)
+		childEnv = append(childEnv, key+"="+extraEnv[key])
+	}
+	args = append(args, config.Image)
+	return args, childEnv
+}
+
+// sortedKeys returns a map's keys in lexical order, so an argv built from them is
+// deterministic.
+func sortedKeys(entries map[string]string) []string {
+	keys := make([]string, 0, len(entries))
+	for key := range entries {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// reservedEnvNames are the variables createRun sets itself. A caller-supplied entry naming one
+// of these is refused rather than merged.
+//
+// The guard exists for one name above all: AGENT_TYPE selects the agent's shape, and a caller
+// free to overwrite it could start a worker outside the service path, where no permission
+// decider is wired and the worker's gate silently disappears. The rest are refused for the
+// same reason at lower stakes — each is a setting the controller owns, and a request that
+// could rewrite one would make the container's configuration depend on its caller.
+var reservedEnvNames = map[string]struct{}{
+	"AGENT_TYPE":           {},
+	"LISTEN":               {},
+	"A2A_PUBLIC_URL":       {},
+	"A2A_AGENT_NAME":       {},
+	tokenEnvName:           {},
+	"ANTHROPIC_BASE_URL":   {},
+	"ANTHROPIC_AUTH_TOKEN": {},
+	"ANTHROPIC_MODEL":      {},
+	"ALLOWED_TOOLS":        {},
+}
+
+// validateExtraEnv refuses a caller-supplied environment that would overwrite a setting the
+// controller owns. It names the offending key so the caller can drop it rather than guess.
+func validateExtraEnv(ctx context.Context, extraEnv map[string]string) error {
+	for _, key := range sortedKeys(extraEnv) {
+		if _, reserved := reservedEnvNames[key]; reserved {
+			return errors.Errorf(
+				ctx,
+				"env %q is set by the controller and cannot be supplied by a create request",
+				key,
+			)
+		}
+	}
+	return nil
 }
 
 // dockerContainer is one worker container as the daemon reports it. It holds no credential:
