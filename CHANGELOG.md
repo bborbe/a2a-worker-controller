@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: let an `EGRESS_ALLOW` entry name a pod label — `namespace/key=value:port` narrows the rule to pods carrying that label, inside that namespace only. A plain `namespace:port` stays namespace-wide. Needed because on nuke `dev` port 9090 is served by the vault writers and the trading gateways alike, so `dev:9090` would let a worker reach the broker gateways; `dev/app=vault-obsidian-personal:9090` opens the personal vault writer alone. A malformed label is refused, never dropped.
+
 ## v0.7.0
 
 - feat: add `WORKER_PRIORITY_CLASS` — when set, every k8s worker Config runs under that PriorityClass instead of the template's. On nuke each class carries its own ResourceQuota, and workers that inherited `claude-interactive` hit its 1-pod cap, which the shared `claude-interactive-0` already fills, so every worker StatefulSet failed `exceeded quota: claude-interactive`. Empty keeps the template's class.

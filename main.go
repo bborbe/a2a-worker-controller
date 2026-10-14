@@ -43,7 +43,7 @@ type application struct {
 	IngressDomain   string `required:"false" arg:"ingress-domain"        env:"INGRESS_DOMAIN"        usage:"k8s backend: parent domain of every worker host"`
 	TLSSecretName   string `required:"false" arg:"tls-secret-name"       env:"TLS_SECRET_NAME"       usage:"k8s backend: wildcard certificate Secret for the ingress domain"`
 	WorkerPriority  string `required:"false" arg:"worker-priority-class" env:"WORKER_PRIORITY_CLASS" usage:"k8s backend: PriorityClass every worker pod runs under (empty keeps the template's)"`
-	EgressAllow     string `required:"false" arg:"egress-allow"          env:"EGRESS_ALLOW"          usage:"k8s backend: namespace:port list every worker may reach besides DNS"`
+	EgressAllow     string `required:"false" arg:"egress-allow"          env:"EGRESS_ALLOW"          usage:"k8s backend: namespace[/key=value]:port list every worker may reach besides DNS"`
 	BuildGitVersion string `required:"false" arg:"build-git-version"     env:"BUILD_GIT_VERSION"     usage:"Build Git version"                                                                                    default:"dev"`
 	BuildGitCommit  string `required:"false" arg:"build-git-commit"      env:"BUILD_GIT_COMMIT"      usage:"Build Git commit hash"                                                                                default:"none"`
 }
