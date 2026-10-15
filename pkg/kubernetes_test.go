@@ -141,10 +141,12 @@ var _ = Describe("KubernetesBackend", func() {
 				}, nil)
 			})
 
-			It("returns the existing worker with no token and creates nothing", func() {
-				Expect(err).To(BeNil())
-				Expect(response.Worker.WorkerID).To(Equal(pkg.WorkerID("existing")))
-				Expect(response.Token).To(BeEmpty())
+			It("refuses, naming the existing worker's id, and creates nothing", func() {
+				// ⚠️ The id is what makes the refusal actionable: `stop` resolves ownership from
+				// it alone, so a caller that does not receive it cannot reap the worker it is
+				// being told about.
+				Expect(err).To(MatchError(ContainSubstring("existing")))
+				Expect(response).To(BeNil())
 				Expect(client.CreateConfigCallCount()).To(Equal(0))
 				Expect(client.CreateSecretCallCount()).To(Equal(0))
 			})

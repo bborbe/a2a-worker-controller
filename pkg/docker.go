@@ -222,10 +222,13 @@ func NewDockerBackend(client DockerClient, prober PortProber, config DockerConfi
 // Create starts one worker container for the requested task and returns it with its own
 // freshly minted bearer token.
 //
-// A task that already has a container returns that container rather than starting a second,
-// so a repeated create never doubles a worker. The existing worker's token is not returned —
-// the controller kept no copy of it — so that reply carries the worker and an empty token; a
-// caller that has lost the credential stops the worker and creates another.
+// ⚠️ A TASK THAT ALREADY HAS A CONTAINER IS REFUSED, NOT ANSWERED. Only one worker is ever
+// started per task, but that worker's token cannot be returned — the controller kept no copy
+// of it — so a success reply would name a worker no caller could authenticate to: it reads as
+// a working worker while being unreachable, and the caller has nothing to reap it with. The
+// refusal carries the existing worker's id instead, which is what makes the caller's own
+// recovery — stop that worker, then create another — possible. That recovery stays on the
+// caller by contract; this method only has to make it reachable.
 func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateResponse, error) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
@@ -241,7 +244,19 @@ func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateR
 		return nil, err
 	}
 	if existing := findContainerByTask(containers, req.Task); existing != nil {
-		return &CreateResponse{Worker: existing.worker(), Token: ""}, nil
+		// ⚠️ THE WORKER ID IS THE POINT OF THIS ERROR, NOT DECORATION. It is the only handle a
+		// caller gets on a container it cannot authenticate to, and `stop` resolves ownership
+		// from that id alone — so naming it is what turns an unreachable worker into a reaped
+		// one. An error without it would leave the caller exactly as stuck as the empty-token
+		// reply this replaces, only with a worse failure mode: a refusal that says nothing
+		// actionable.
+		return nil, errors.Errorf(
+			ctx,
+			"task %q already has worker %q, whose token this controller did not keep; "+
+				"stop that worker and create another",
+			req.Task,
+			existing.WorkerID,
+		)
 	}
 
 	port, err := b.freePort(ctx)
