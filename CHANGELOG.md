@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.9.1
 
 - fix: refuse a `create` for a task that already has a worker, instead of answering with that worker and an empty token. ⚠️ The old reply was **unusable rather than merely incomplete**: every follow-up turn authenticates with the worker's token, the controller keeps no copy of it, and the reply nevertheless read as a success — so the caller was handed a worker it could never reach and had no id to reap it with. Both backends now fail the call, and the controller's log names the existing worker's id. ⚠️ **That id does not reach the caller**: a backend failure is reported as `TASK_STATE_FAILED` with no detail attached, so a caller that must recover — stop the existing worker, then create again — resolves the id itself from `list`, matching on the `task` it asked for. Retrying `create` unchanged on this failure fails identically and forever. One worker per task is unchanged: the refusal starts nothing.
 
