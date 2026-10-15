@@ -346,23 +346,28 @@ var _ = Describe("StubWorkerBackend", func() {
 		Expect(responseOf(emptyEvents).List.Workers).To(BeEmpty())
 	})
 
-	It("returns the existing worker for a task that already has one", func() {
+	It("refuses a task that already has a worker, and starts no second one", func() {
 		firstEvents, firstErrs := run(executor, ctx, execContextFor(pkg.ControlRequest{
 			Operation: pkg.OperationCreate,
 			Create:    &pkg.CreateRequest{Task: "task-1"},
 		}))
 		Expect(firstErrs).To(HaveEach(BeNil()))
+		Expect(responseOf(firstEvents).Create.Worker.WorkerID).NotTo(BeEmpty())
 
+		// ⚠️ THE REFUSAL REACHES THE CALLER AS A BARE FAILED STATUS, WITH NO DETAIL. The executor
+		// logs the backend's error and yields `TaskStateFailed` with a nil message, so the worker
+		// id the refusal names is NOT readable from this reply — which is exactly why the
+		// supervisor resolves it from `list` instead. This spec pins that shape, because the
+		// recovery on the other side is built on it.
 		secondEvents, secondErrs := run(executor, ctx, execContextFor(pkg.ControlRequest{
 			Operation: pkg.OperationCreate,
 			Create:    &pkg.CreateRequest{Task: "task-1"},
 		}))
 		Expect(secondErrs).To(HaveEach(BeNil()))
+		Expect(terminalState(secondEvents)).To(Equal(a2a.TaskStateFailed))
 
-		first := responseOf(firstEvents)
-		second := responseOf(secondEvents)
-		Expect(second.Create.Worker.WorkerID).To(Equal(first.Create.Worker.WorkerID))
-
+		// ⚠️ One worker per task is the invariant the refusal protects, and it holds precisely
+		// because the refusal starts nothing.
 		listEvents, _ := run(executor, ctx, execContextFor(pkg.ControlRequest{
 			Operation: pkg.OperationList,
 		}))

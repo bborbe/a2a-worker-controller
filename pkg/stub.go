@@ -39,8 +39,13 @@ func NewStubWorkerBackend() *StubWorkerBackend {
 }
 
 // Create records a worker for the requested task and returns it with a token derived from
-// its id. A task that already has a worker returns the existing one, matching the contract
-// the real backends keep, so a repeated create never starts a second worker.
+// its id.
+//
+// ⚠️ A TASK THAT ALREADY HAS A WORKER IS REFUSED, matching the contract the real backends
+// keep. The stub's token is *derived* rather than kept, so it could answer where they cannot —
+// but answering here would let a spec certify a reply the real backends refuse, which is the
+// exact divergence a stub must not introduce. A stub that is easier to satisfy than the thing
+// it stands in for tests the stub.
 func (s *StubWorkerBackend) Create(
 	ctx context.Context,
 	req CreateRequest,
@@ -50,7 +55,13 @@ func (s *StubWorkerBackend) Create(
 
 	for _, worker := range s.workers {
 		if worker.Task == req.Task {
-			return &CreateResponse{Worker: worker, Token: stubToken(worker.WorkerID)}, nil
+			return nil, errors.Errorf(
+				ctx,
+				"task %q already has worker %q, whose token this controller did not keep; "+
+					"stop that worker and create another",
+				req.Task,
+				worker.WorkerID,
+			)
 		}
 	}
 

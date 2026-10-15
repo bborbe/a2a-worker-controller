@@ -36,7 +36,7 @@ const (
 	// controller restart rather than being rebuilt from controller memory.
 	workerIDLabel = "com.bborbe.a2a-worker-controller.worker-id"
 	// taskLabel carries the vault task the worker serves. Create dedups on it, so a repeated
-	// create returns the existing worker instead of starting a second.
+	// create is refused rather than starting a second worker.
 	taskLabel = "com.bborbe.a2a-worker-controller.task"
 )
 
@@ -192,8 +192,9 @@ func (p *tcpPortProber) IsFree(_ context.Context, port int) bool {
 // selection wiring stay backend-independent.
 //
 // It holds no worker state between calls. Every list reads the daemon and every create dedups
-// against it, so a controller restart loses nothing and a second controller sharing the
-// daemon sees the same workers.
+// against it — refusing a task that already has a worker rather than answering with one no
+// caller could authenticate to — so a controller restart loses nothing and a second controller
+// sharing the daemon sees the same workers.
 type dockerBackend struct {
 	client DockerClient
 	prober PortProber
