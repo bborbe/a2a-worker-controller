@@ -11,8 +11,8 @@ package pkg
 type WorkerID string
 
 // TaskName is the vault task a worker serves. It names the work, not the worker — a task
-// has at most one worker, and a second create for a task that already has one returns the
-// existing worker rather than starting another.
+// has at most one worker, and a second create for a task that already has one is REFUSED,
+// naming that worker, rather than answered with it.
 type TaskName string
 
 // Backend names the implementation that serves workers. Its value space belongs to the

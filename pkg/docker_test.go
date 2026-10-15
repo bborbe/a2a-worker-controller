@@ -366,7 +366,7 @@ var _ = Describe("DockerBackend", func() {
 			Expect(runCallIndex(client.args)).To(Equal(-1))
 		})
 
-		It("returns the existing worker for a task that already has one", func() {
+		It("refuses a task that already has a worker, naming that worker's id", func() {
 			client := &fakeDockerClient{
 				stdout: []string{psLine(name, workerID, task, ports)},
 			}
@@ -374,24 +374,16 @@ var _ = Describe("DockerBackend", func() {
 
 			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
 
-			Expect(err).To(BeNil())
-			Expect(response.Worker.WorkerID).To(Equal(workerID))
-			Expect(response.Worker.A2AURL).To(Equal("http://localhost:9093/a2a"))
+			// ⚠️ THE ID IS THE ASSERTION THAT MATTERS. It is the only handle a caller gets on a
+			// worker it cannot authenticate to, and `stop` resolves ownership from that id alone
+			// — so a refusal that did not name it would leave the caller exactly as stuck as the
+			// empty-token reply this replaced.
+			Expect(err).To(MatchError(ContainSubstring(string(workerID))))
+			Expect(err).To(MatchError(ContainSubstring(string(task))))
+			Expect(response).To(BeNil())
 			// A duplicate create is a +0 delta: nothing was started.
 			Expect(client.args).To(HaveLen(1))
 			Expect(runCallIndex(client.args)).To(Equal(-1))
-		})
-
-		It("returns no token for an existing worker, because none was kept", func() {
-			client := &fakeDockerClient{
-				stdout: []string{psLine(name, workerID, task, ports)},
-			}
-			backend := pkg.NewDockerBackend(client, &fakePortProber{}, pkg.DefaultDockerConfig())
-
-			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
-
-			Expect(err).To(BeNil())
-			Expect(response.Token).To(BeEmpty())
 		})
 
 		It("does not dedup a different task onto an existing worker", func() {

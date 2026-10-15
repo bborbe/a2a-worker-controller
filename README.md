@@ -98,13 +98,26 @@ curl -s http://localhost:8080/a2a \
 
 | Operation | Request | Reply |
 |---|---|---|
-| `create` | `{"operation":"create","create":{"task":"<name>"}}` | `{"create":{"worker":{…},"token":"…"}}` |
+| `create` | `{"operation":"create","create":{"task":"<name>"}}` | `{"create":{"worker":{…},"token":"…"}}` — ⚠️ **FAILED** if the task already has a worker; see below |
 | `list` | `{"operation":"list"}` | `{"list":{"workers":[…]}}` |
 | `stop` | `{"operation":"stop","stop":{"worker_id":"…"}}` | `{"stop":{"worker":{…}}}` |
 
 The control reply is at `result.task.artifacts[0].parts[0].data`. A `worker` is
 `{worker_id, task, a2a_url, backend, state}`; the `token` returned by `create` is that
 worker's **own** A2A bearer token and is returned by no other operation.
+
+⚠️ **A `create` for a task that already has a worker is REFUSED, and the refusal is not a
+transport failure.** Only one worker is ever started per task, and that worker's token cannot
+be returned — the controller kept no copy of it — so answering with the worker would name
+something no caller could authenticate to: a reply that reads as a working worker while being
+unreachable. The controller therefore fails the call, and its log names the existing worker's
+id.
+
+⚠️ **That id does not travel to the caller.** A backend failure is reported as
+`TASK_STATE_FAILED` with no detail attached, so a caller that must recover — stop the existing
+worker, then create again — resolves the id **itself** from `list`, matching on the `task` it
+asked for. ⚠️ Do **not** retry `create` unchanged on this failure: it fails identically and
+forever while the worker it names is left running.
 
 **The schema is `pkg/types.go`** — the single definition of the API, shared by the Docker
 backend, the k3s sibling, and the supervisor's `spawn_agent` target. Nothing above

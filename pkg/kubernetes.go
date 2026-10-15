@@ -126,9 +126,11 @@ func NewKubernetesBackend(
 // Create starts one worker pod for the requested task and returns it with its own freshly
 // minted bearer token.
 //
-// A task that already has a worker returns that worker rather than starting a second. Its
-// token is not returned — the controller kept no copy of it — so that reply carries the
-// worker and an empty token, the same contract the docker backend keeps.
+// ⚠️ A TASK THAT ALREADY HAS A WORKER IS REFUSED, NOT ANSWERED — the same contract the docker
+// backend keeps. Only one worker is ever started per task, but its token cannot be returned —
+// the controller kept no copy of it — so a success reply would name a worker no caller could
+// authenticate to. The refusal carries the existing worker's id, which is what lets the caller
+// stop that worker and create another.
 func (b *kubernetesBackend) Create(
 	ctx context.Context,
 	req CreateRequest,
@@ -141,7 +143,15 @@ func (b *kubernetesBackend) Create(
 		return nil, err
 	}
 	if existing := configs.byTask(req.Task); existing != nil {
-		return &CreateResponse{Worker: b.workerFor(*existing), Token: ""}, nil
+		// The id is the whole value of this refusal: `stop` resolves ownership from it alone,
+		// so naming it is what turns an unreachable worker into a reaped one.
+		return nil, errors.Errorf(
+			ctx,
+			"task %q already has worker %q, whose token this controller did not keep; "+
+				"stop that worker and create another",
+			req.Task,
+			b.workerFor(*existing).WorkerID,
+		)
 	}
 
 	template, err := b.client.GetConfig(ctx, b.templateConfig)

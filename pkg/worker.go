@@ -14,8 +14,12 @@ import "context"
 // the schema, to the executor or to the HTTP surface.
 type WorkerBackend interface {
 	// Create starts one worker serving the requested task and returns it together with
-	// its own bearer token. A task that already has a worker returns the existing one
-	// rather than starting a second.
+	// its own bearer token. ⚠️ A task that already has a worker is REFUSED, naming that
+	// worker's id, rather than answered: only one worker is ever started per task, and the
+	// existing worker's token cannot be returned because the backend kept no copy of it —
+	// so a success reply would name a worker no caller could authenticate to, which reads
+	// as a working worker while being unreachable. The caller's recovery is to stop the
+	// named worker and create again.
 	Create(ctx context.Context, req CreateRequest) (*CreateResponse, error)
 
 	// List returns every worker the backend owns. It is rebuilt from the backend's own
