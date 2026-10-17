@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.11.0
 
 - feat: `make install` builds, signs and installs the local launchd binary safely, replacing the documented `go install . && cp … ~/.local/bin/` update. The `cp` overwrote the signed binary in place, so the next exec was killed with `SIGKILL (Code Signature Invalid)`; under `KeepAlive` that crash-looped at launchd's 10 s default throttle, which preceded the 2026-10-17 kernel panic. `install` now builds to `<bin>.new`, signs it with the stable `bborbe local codesign` identity (identifier `de.bborbe.a2a-worker-controller`, which also keeps the TCC grant across rebuilds), runs `codesign --verify --strict`, `mv`s it into place, then enforces the launchd baseline on the installed plist (`ThrottleInterval` 30, `SoftResourceLimits.NumberOfFiles` 4096; new idempotent `launchd-baseline` target) and reloads with `bootout` + `bootstrap` (new `launchd-reload` target, which waits for the asynchronous bootout).
 
