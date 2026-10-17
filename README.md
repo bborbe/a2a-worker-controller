@@ -29,11 +29,23 @@ Optional, with defaults:
 
 | Flag | Env | Default | Meaning |
 |---|---|---|---|
-| `-backend` | `BACKEND` | `docker` | which backend serves workers |
+| `-backend` | `BACKEND` | `docker` | which backend serves workers — `docker`, `k8s` or `local` |
 | `-a2a-agent-name` | `A2A_AGENT_NAME` | `a2a-worker-controller` | name the Agent Card advertises |
 | `-sentry-proxy` | `SENTRY_PROXY` | — | Sentry proxy URL |
 | `-build-git-version` | `BUILD_GIT_VERSION` | `dev` | reported build version |
 | `-build-git-commit` | `BUILD_GIT_COMMIT` | `none` | reported build commit |
+| `-local-vault` | `LOCAL_VAULT` | — | **local backend, required**: vault root the workers' task files live in |
+| `-local-claude-script` | `LOCAL_CLAUDE_SCRIPT` | — | **local backend, required**: the vault's `claude_script` launcher every worker tab runs |
+| `-local-wezterm` | `LOCAL_WEZTERM` | the app bundle's binary | local backend: absolute path to the `wezterm` binary |
+| `-local-state-file` | `LOCAL_STATE_FILE` | `~/.local/state/a2a-worker-controller/local-workers.json` | local backend: the ownership store |
+
+The local backend's four settings are checked only when it is the backend selected; a
+controller serving containers starts without them.
+
+⚠️ **`-local-wezterm` is an absolute path and a bare `wezterm` will not work.** Under launchd
+`wezterm` is not on `PATH` — it exists only inside the app bundle — and Go resolves the binary
+against the *parent's* `PATH`, never against the child environment, so prepending to the
+child's `PATH` cannot repair it. The default is `/Applications/WezTerm.app/Contents/MacOS/wezterm`.
 
 `WORKER_IMAGE` is **required and has no default on purpose** — an untagged reference such as
 `bborbe/agent-claude` resolves to `:latest`, which need not exist, and the failure surfaces
@@ -103,8 +115,16 @@ curl -s http://localhost:8080/a2a \
 | `stop` | `{"operation":"stop","stop":{"worker_id":"…"}}` | `{"stop":{"worker":{…}}}` |
 
 The control reply is at `result.task.artifacts[0].parts[0].data`. A `worker` is
-`{worker_id, task, a2a_url, backend, state}`; the `token` returned by `create` is that
-worker's **own** A2A bearer token and is returned by no other operation.
+`{worker_id, task, a2a_url, backend, state, pane_id, session_id}`; the `token` returned by
+`create` is that worker's **own** A2A bearer token and is returned by no other operation.
+
+⚠️ **`pane_id` and `session_id` exist for workers that have no URL.** A `local` worker is a
+WezTerm tab: it serves no A2A endpoint, so `a2a_url` is **empty**, the token `create` returns
+is **empty**, and the pane id is the only handle a caller has on it — that is what `stop`
+takes, and what a supervisor messages through. `session_id` is the Claude Code session the tab
+bound to the task; it is empty until that session has bound itself, which happens after
+`create` returns, so a caller that needs it reads `list` rather than treating the empty value
+as a failure. For a `docker` or `k8s` worker both fields are empty and `a2a_url` is set.
 
 ⚠️ **A `create` for a task that already has a worker is REFUSED, and the refusal is not a
 transport failure.** Only one worker is ever started per task, and that worker's token cannot

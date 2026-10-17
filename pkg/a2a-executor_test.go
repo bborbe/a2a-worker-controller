@@ -94,7 +94,7 @@ var _ = Describe("A2AExecutor", func() {
 		backend = &mocks.PkgWorkerBackend{}
 		// The mock is wired in through the real selection wiring, so the spec exercises
 		// the provider as well as the executor.
-		executor = pkg.NewA2AExecutor(pkg.NewBackendProvider(backend, nil), pkg.BackendDocker)
+		executor = pkg.NewA2AExecutor(pkg.NewBackendProvider(backend, nil, nil), pkg.BackendDocker)
 	})
 
 	Context("dispatching an operation", func() {
@@ -247,7 +247,7 @@ var _ = Describe("A2AExecutor", func() {
 
 	Context("when the selected backend is not wired", func() {
 		It("reports the call as failed rather than answering", func() {
-			executor = pkg.NewA2AExecutor(pkg.NewBackendProvider(nil, nil), pkg.BackendDocker)
+			executor = pkg.NewA2AExecutor(pkg.NewBackendProvider(nil, nil, nil), pkg.BackendDocker)
 
 			events, errs := run(executor, ctx, execContextFor(pkg.ControlRequest{
 				Operation: pkg.OperationList,
@@ -263,7 +263,7 @@ var _ = Describe("A2AExecutor", func() {
 var _ = Describe("A2A surface", func() {
 	It("serves a control call over the JSON-RPC binding", func() {
 		executor := pkg.NewA2AExecutor(
-			pkg.NewBackendProvider(pkg.NewStubWorkerBackend(), nil),
+			pkg.NewBackendProvider(pkg.NewStubWorkerBackend(), nil, nil),
 			pkg.BackendDocker,
 		)
 		handler := pkg.NewA2AHandler(executor)
@@ -305,7 +305,7 @@ var _ = Describe("StubWorkerBackend", func() {
 		stub = pkg.NewStubWorkerBackend()
 		// The stub is selected through the wiring alone: the executor and the provider
 		// are the production ones and neither knows it holds a stub.
-		executor = pkg.NewA2AExecutor(pkg.NewBackendProvider(stub, nil), pkg.BackendDocker)
+		executor = pkg.NewA2AExecutor(pkg.NewBackendProvider(stub, nil, nil), pkg.BackendDocker)
 	})
 
 	It("round-trips create, list and stop", func() {

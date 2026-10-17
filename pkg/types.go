@@ -52,12 +52,26 @@ const (
 // Worker is one worker as the control API reports it. It deliberately carries no token: a
 // worker's token is returned once by create and never again, so no listing, no log and no
 // restart can leak one.
+//
+// ⚠️ PaneID AND SessionID ARE A DELIBERATE WIDENING OF THIS SHARED SCHEMA. What this file
+// keeps out is a backend's IDENTITY: no backend is named here, so a second backend does not
+// have to edit the schema to become selectable. These two fields are not that — they record
+// how a worker is reached when it has no URL. A worker that runs in a WezTerm tab serves no
+// A2A endpoint, so its pane is the only handle a caller has on it, and without these fields
+// there would be nowhere for that handle to travel. A caller reads them when a2a_url is
+// empty and ignores them otherwise; both are empty for a backend whose workers answer at
+// their own URL.
 type Worker struct {
 	WorkerID WorkerID    `json:"worker_id"`
 	Task     TaskName    `json:"task"`
 	A2AURL   string      `json:"a2a_url"`
 	Backend  Backend     `json:"backend"`
 	State    WorkerState `json:"state"`
+	// PaneID is the WezTerm pane the worker runs in. Empty unless the worker runs in a tab.
+	PaneID string `json:"pane_id"`
+	// SessionID is the Claude Code session the worker's tab is bound to. Empty unless the
+	// worker runs in a tab, and empty there too until the session's own task binding lands.
+	SessionID string `json:"session_id"`
 }
 
 // ControlRequest is one control-API call. Exactly one operation-specific field is set and
