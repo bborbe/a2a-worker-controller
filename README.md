@@ -16,6 +16,18 @@ empty `a2a_url` and the pane id is the handle instead.
 go install github.com/bborbe/a2a-worker-controller@latest
 ```
 
+### Local launchd service
+
+On the operator's Mac the controller runs as the LaunchAgent `com.bborbe.a2a-worker-controller`. Its plist is hand-installed and runs the TeamVault wrapper `~/.local/bin/a2a-worker-controller.sh`, which execs `~/.local/bin/a2a-worker-controller`. To install or update the binary:
+
+```bash
+make install
+```
+
+It builds to `~/.local/bin/a2a-worker-controller.new`, signs it with the `bborbe local codesign` keychain identity, verifies it, moves it into place, sets `ThrottleInterval` 30 and `SoftResourceLimits.NumberOfFiles` 4096 on the plist, and reloads the job with `bootout` + `bootstrap`.
+
+⚠️ Never `cp` a new build over the installed binary. Overwriting the signed file in place gets the next exec killed with `SIGKILL (Code Signature Invalid)`, and under `KeepAlive` that becomes a crash loop.
+
 ## Configure
 
 Required — the process refuses to start without these:
