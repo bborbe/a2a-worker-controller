@@ -79,14 +79,26 @@ type LocalConfig struct {
 	// each worker's tab starts in, so the worker runs where its task lives.
 	VaultDir string
 	// ClaudeScript is the absolute path to the vault's claude_script launcher — the `cc-*`
-	// script every worker's tab execs.
+	// script a worker's tab execs when neither the task nor its goals names one.
 	ClaudeScript string
-	// WindowID names the WezTerm window a worker's tab opens in, from LOCAL_WINDOW_ID. Empty
-	// omits the flag entirely, and the tab then lands in the window the spawning process is
-	// associated with — which under launchd is the default window. It exists because the flag
-	// is part of the spawn this backend mirrors; the controller has no role map to resolve one
-	// from, so it is configured rather than derived.
+	// WindowID names the WezTerm window a worker's tab opens in when the task's role does not
+	// resolve one, from LOCAL_WINDOW_ID. Empty omits the flag entirely, and the tab then lands in
+	// the window the spawning process is associated with — which under launchd is the default
+	// window.
+	//
+	// ⚠️ IT IS A FALLBACK, NOT THE RULE, AND IT IS THE WRONG SHAPE FOR THE RULE. A worker's
+	// window comes from its task's `role:` resolved against the WezTerm role map (see
+	// resolveRole), because one configured window cannot serve three roles: measured 2026-10-17,
+	// two creates fifteen minutes apart landed in windows 2 and 0, both for `role: agent` rows, so
+	// placement was luck. This value is used only when the role map has no usable entry, and the
+	// fallback is logged rather than silent.
 	WindowID string
+	// RoleMapPath is the WezTerm role map a task's `role:` is resolved against. Empty uses
+	// ~/.cache/wezterm-role-map.json, which is the file the WezTerm configuration itself writes.
+	//
+	// It exists so a test can drive role resolution against a temporary map; a deployment never
+	// sets it, and an unusable map degrades to WindowID above rather than refusing a create.
+	RoleMapPath string
 }
 
 // LocalWorker is one worker the local backend owns, as the ownership store records it.
@@ -279,6 +291,21 @@ type WeztermClient interface {
 	PaneIDs(ctx context.Context, guiID string) ([]string, error)
 	// KillPane closes the pane paneID names in the GUI guiID names.
 	KillPane(ctx context.Context, guiID string, paneID string) error
+	// SendText types text into the pane paneID names, submits it, and does not return until the
+	// pane's own output shows marker.
+	//
+	// ⚠️ THE SEND'S EXIT CODE IS NOT THE CONFIRMATION, WHICH IS WHY marker EXISTS. `wezterm cli
+	// send-text` reports that keystrokes reached the pty, and that is true whether or not the
+	// message submitted — measured on the supervisor's own path, where a submit can be swallowed
+	// outright (3 of 6 spawns, 2026-09-20) and a colour was reported as applied while it never was.
+	// A marker that never appears is therefore an ERROR rather than a success.
+	//
+	// ⚠️ IT ACTIVATES THE PANE FIRST, AND THAT IS NOT OPTIONAL. `send-text` reaches a pane only
+	// once its tab is activated — measured 2026-09-14, where two attempts against a running worker
+	// did nothing and running `activate-tab` first made the same call land immediately. The
+	// activation steals focus, which is why this capability is confined to the local backend's own
+	// freshly-spawned panes and is never offered on a worker mid-run.
+	SendText(ctx context.Context, guiID string, paneID string, text string, marker string) error
 }
 
 // execWeztermClient is the WeztermClient that shells out to the wezterm binary.
@@ -333,6 +360,163 @@ func (c *execWeztermClient) PaneIDs(ctx context.Context, guiID string) ([]string
 func (c *execWeztermClient) KillPane(ctx context.Context, guiID string, paneID string) error {
 	_, err := c.run(ctx, guiID, []string{"cli", "kill-pane", "--pane-id", paneID})
 	return err
+}
+
+// SendText activates the pane, waits for its input box, types text and submits it, then confirms
+// the submission against the pane's own output.
+//
+// ⚠️ EVERY STEP IS A MEASURED REQUIREMENT RATHER THAN CEREMONY, and each one fails silently when
+// dropped: without the activation the keystrokes reach nothing; without the readiness poll the text
+// lands in a composer that is still painting its placeholder and is swallowed; without the carriage
+// return the message is typed and never submitted; and without the marker poll a send that never
+// took effect is reported as delivered. See claude-supervisor's server/tab.mjs, where all four were
+// measured against live panes.
+func (c *execWeztermClient) SendText(
+	ctx context.Context,
+	guiID string,
+	paneID string,
+	text string,
+	marker string,
+) error {
+	// ⚠️ ACTIVATED BY PANE ID, NEVER BY TAB ID. A tab id is renumbered when its tab moves windows
+	// (measured 2026-09-18: tabs 158/159/160 in window 0 became 163/164/165 in window 2, and
+	// `activate-tab --tab-id 159` failed outright while `activate-pane --pane-id 239` worked). A
+	// pane id survives the move, and it is the handle this backend already holds.
+	if _, err := c.run(ctx, guiID, []string{"cli", "activate-pane", "--pane-id", paneID}); err != nil {
+		return errors.Wrapf(ctx, err, "activate pane %q failed", paneID)
+	}
+	if err := c.waitUntilReady(ctx, guiID, paneID); err != nil {
+		return err
+	}
+	// ⚠️ A CARRIAGE RETURN SUBMITS; A LINE FEED DOES NOT. "\n" types a line break into the input
+	// box without submitting it, which from the caller's side looks exactly like a message that was
+	// ignored.
+	if _, err := c.run(ctx, guiID, []string{
+		"cli", "send-text", "--pane-id", paneID, "--no-paste", text + "\r",
+	}); err != nil {
+		return errors.Wrapf(ctx, err, "send-text to pane %q failed", paneID)
+	}
+	return c.confirmInPane(ctx, guiID, paneID, marker)
+}
+
+// waitUntilReady polls until the pane's input box is drawn and EMPTY.
+//
+// ⚠️ AN EMPTY COMPOSER IS THE TEST, NOT A DRAWN ONE. The glyph alone appears too early: the TUI
+// paints the composer with a placeholder suggestion before it will honour a submit, and a message
+// sent into that phase is accepted and then swallowed — the text lands in the composer and the
+// Enter does nothing (measured 2026-09-20: two spawns whose text arrived 81ms and 137ms after a
+// placeholder sample both stranded unsubmitted, while the one that arrived against a plain prompt
+// submitted). A fixed sleep is a race that fails on a loaded machine.
+func (c *execWeztermClient) waitUntilReady(ctx context.Context, guiID string, paneID string) error {
+	for attempt := 0; attempt < localPaneReadyAttempts; attempt++ {
+		text, err := c.paneText(ctx, guiID, paneID, 0)
+		if err == nil && composerEmpty(text) {
+			return nil
+		}
+		if err := sleepContext(ctx, localPaneReadyInterval); err != nil {
+			return err
+		}
+	}
+	return errors.Errorf(
+		ctx,
+		"pane %q is not accepting input within %dms",
+		paneID,
+		(localPaneReadyAttempts*localPaneReadyInterval)/time.Millisecond,
+	)
+}
+
+// confirmInPane polls the pane for marker, retrying the Enter when it does not appear.
+//
+// ⚠️ AN EMPTY COMPOSER IS DELIBERATELY NOT THE SUCCESS SIGNAL. A stranded message can also be
+// discarded without ever submitting (observed 2026-09-20: the text sat unsubmitted for 14 minutes,
+// then vanished, with the colour never applied), so a cleared composer proves nothing. Only the
+// marker does. The retry is a bare Enter repeated until it takes — extra Enters on an empty composer
+// are harmless — which is the remedy measured for a submit that was swallowed outright.
+//
+// ⚠️ THE READ CARRIES SCROLLBACK. A success marker is drawn once and then scrolls away, so a
+// viewport-only read can miss a submission that really happened.
+func (c *execWeztermClient) confirmInPane(
+	ctx context.Context,
+	guiID string,
+	paneID string,
+	marker string,
+) error {
+	for attempt := 0; attempt <= localConfirmRetries; attempt++ {
+		if attempt > 0 {
+			if _, err := c.run(ctx, guiID, []string{
+				"cli", "send-text", "--pane-id", paneID, "--no-paste", "\r",
+			}); err != nil {
+				return errors.Wrapf(ctx, err, "retry the Enter into pane %q failed", paneID)
+			}
+		}
+		for poll := 0; poll < localConfirmAttempts; poll++ {
+			text, err := c.paneText(ctx, guiID, paneID, localPaneScrollbackLines)
+			if err == nil && strings.Contains(text, marker) {
+				return nil
+			}
+			if err := sleepContext(ctx, localConfirmInterval); err != nil {
+				return err
+			}
+		}
+	}
+	return errors.Errorf(
+		ctx,
+		"pane %q never showed %q after %d attempts — the message did not take effect and must not "+
+			"be reported as delivered",
+		paneID,
+		marker,
+		localConfirmRetries+1,
+	)
+}
+
+// paneText reads the pane's text, optionally reaching back into its scrollback.
+func (c *execWeztermClient) paneText(
+	ctx context.Context,
+	guiID string,
+	paneID string,
+	scrollback int,
+) (string, error) {
+	args := []string{"cli", "get-text", "--pane-id", paneID}
+	if scrollback > 0 {
+		args = append(args, "--start-line", "-"+strconv.Itoa(scrollback))
+	}
+	return c.run(ctx, guiID, args)
+}
+
+// composerLine returns the last line the prompt glyph starts, or the empty string when there is
+// none. It is the LAST one because every echoed submitted prompt above it carries the same glyph, so
+// position — not the glyph alone — is what identifies the input box.
+func composerLine(text string) string {
+	lines := strings.Split(text, "\n")
+	for index := len(lines) - 1; index >= 0; index-- {
+		if strings.HasPrefix(lines[index], localPromptGlyph) {
+			return lines[index]
+		}
+	}
+	return ""
+}
+
+// composerEmpty reports whether the pane's input box is drawn and holds nothing. A box already
+// holding text is not ready either — this call must never press Enter into a line it did not write.
+func composerEmpty(text string) bool {
+	line := composerLine(text)
+	if line == "" {
+		return false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(line, localPromptGlyph)) == ""
+}
+
+// sleepContext waits for d, or returns as soon as ctx is done.
+//
+// A plain time.Sleep would keep polling a pane whose request has already been cancelled — and the
+// poll is a subprocess, so the whole wait would outlive the caller that asked for it.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return errors.Wrap(ctx, ctx.Err(), "waiting interrupted")
+	case <-time.After(d):
+		return nil
+	}
 }
 
 // GuiID returns the live GUI socket's path. The path carries the GUI process's pid, so it
@@ -641,10 +825,16 @@ func workPrompt(task TaskName) string {
 }
 
 // tabCommand builds the shell command a worker's tab runs, mirroring the supervisor's own tab
-// spawn: the caller's environment exported, then the vault directory, then the vault's
-// launcher with the tab name and the work prompt.
+// spawn: the caller's environment exported, then the vault directory, then the launcher with the
+// tab name and the work prompt.
 //
 // The launcher is exec'd, so the tab's process IS the worker and closing the pane stops it.
+//
+// ⚠️ THE LAUNCHER IS A PARAMETER RATHER THAN A CONFIG FIELD, AND THAT IS WHAT MAKES A TASK'S OWN
+// `launcher:` REACH THE TAB. It used to be read from the config here, which is why every tab ran
+// the vault default however the task was declared. It arrives already resolved and expanded — see
+// chooseLauncher — so the value this function quotes is the same file the executability check
+// stat'ed and the same one the create reply reports.
 //
 // ⚠️ ON THIS PATH A CALLER'S ENVIRONMENT VALUES TRAVEL IN ARGV, WHICH THE DOCKER BACKEND GOES
 // OUT OF ITS WAY TO PREVENT. The two are not inconsistent, they are constrained differently:
@@ -655,10 +845,10 @@ func workPrompt(task TaskName) string {
 // must not hand this backend a secret it would not accept appearing in `ps`; the reserved-name
 // guard and the shell-name guard below are what stop a name from becoming syntax, and neither
 // can hide a value.
-func tabCommand(config LocalConfig, env map[string]string, task TaskName) string {
+func tabCommand(vaultDir string, launcher string, env map[string]string, task TaskName) string {
 	return shellEnvExports(env) +
-		"cd " + shellQuote(expandHome(config.VaultDir)) +
-		" && exec " + shellQuote(expandHome(config.ClaudeScript)) +
+		"cd " + shellQuote(expandHome(vaultDir)) +
+		" && exec " + shellQuote(launcher) +
 		" -n " + shellQuote(tabNameFor(task)) +
 		" " + shellQuote(workPrompt(task))
 }
@@ -808,6 +998,14 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		return nil, err
 	}
 
+	// ⚠️ BOTH RESOLUTIONS ARE REFUSED BEFORE ANY TAB IS OPENED. A launcher that is not an executable
+	// file, or a role this backend does not know, must be discovered here rather than from a pane
+	// that died on its own — after a worker had already been recorded as running.
+	chosen, role, err := b.resolveTask(ctx, req.Task)
+	if err != nil {
+		return nil, err
+	}
+
 	workers, err := b.store.List(ctx)
 	if err != nil {
 		return nil, err
@@ -856,8 +1054,8 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	paneID, err := b.client.Spawn(
 		ctx,
 		guiID,
-		b.config.WindowID,
-		tabCommand(b.config, req.Env, req.Task),
+		b.roleWindowID(req.Task, role),
+		tabCommand(b.config.VaultDir, chosen.Path, req.Env, req.Task),
 	)
 	if err != nil {
 		// ⚠️ THE PANE ID IS GENUINELY UNKNOWN ON THIS PATH, WHICH IS WHY NONE IS NAMED HERE.
@@ -883,7 +1081,24 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	if err := b.recordWorker(ctx, guiID, workers, worker); err != nil {
 		return nil, err
 	}
-	return &CreateResponse{Worker: worker.worker(), Token: ""}, nil
+	// ⚠️ THE COLOUR IS APPLIED AFTER THE RECORD, NOT BEFORE, AND THE ORDER IS LOAD-BEARING. The
+	// store write is what makes a pane stoppable, so the window between the spawn and that write is
+	// the only one in which a live tab can be orphaned; the colour send blocks for up to a few
+	// seconds and must not widen it. A colour that fails to apply is logged and non-fatal — the
+	// worker still has its task — see applyRoleColor.
+	//
+	// ⚠️ IT BLOCKS WHILE THIS BACKEND'S MUTEX IS HELD, WHICH IS A DELIBERATE TRADE RATHER THAN AN
+	// OVERSIGHT. The send polls the pane, so a slow-starting TUI holds the lock for a few seconds and
+	// a concurrent list waits behind it — but the alternative is worse: releasing the lock first
+	// would let a stop kill the pane mid-send, and a create that returned before its colour landed
+	// would report an applied colour it never confirmed.
+	b.applyRoleColor(ctx, guiID, paneID, role)
+	return &CreateResponse{
+		Worker:         worker.worker(),
+		Token:          "",
+		Launcher:       chosen.Path,
+		LauncherSource: string(chosen.Source),
+	}, nil
 }
 
 // recordWorker appends the new worker to the store, closing its pane again when that write

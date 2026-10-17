@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	vaultconfig "github.com/bborbe/vault-cli/pkg/config"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -172,7 +173,8 @@ var _ = Describe("local backend internals", func() {
 		// profile default overwrites.
 		It("exports the caller's environment before the cd, then execs the launcher", func() {
 			command := tabCommand(
-				LocalConfig{VaultDir: "/vault", ClaudeScript: "/bin/cc"},
+				"/vault",
+				"/bin/cc",
 				map[string]string{"B_TOKEN": "s3cr3t", "A_URL": "http://x"},
 				"My Task",
 			)
@@ -185,13 +187,28 @@ var _ = Describe("local backend internals", func() {
 		})
 
 		It("renders no export at all when the caller supplied no environment", func() {
-			command := tabCommand(
-				LocalConfig{VaultDir: "/vault", ClaudeScript: "/bin/cc"},
-				nil,
-				"t",
-			)
+			command := tabCommand("/vault", "/bin/cc", nil, "t")
 
 			Expect(command).To(HavePrefix("cd '/vault'"))
+		})
+
+		// ⚠️ THE LAUNCHER IS THE ONE IT WAS HANDED, NOT THE CONFIGURED ONE, AND THIS IS THE WHOLE
+		// POINT OF THE CHANGE: the vault launcher used to be read from the config in here, which is
+		// how every tab came up on the vault default however the task was declared.
+		It("execs the launcher it was handed rather than a configured one", func() {
+			command := tabCommand("/vault", "/scripts/cc-private-claude", nil, "t")
+
+			Expect(command).To(ContainSubstring("exec '/scripts/cc-private-claude'"))
+			Expect(command).NotTo(ContainSubstring("cc-private'"))
+		})
+
+		It("expands a leading ~ in the vault directory", func() {
+			home, err := os.UserHomeDir()
+			Expect(err).To(BeNil())
+
+			command := tabCommand("~/vault", "/bin/cc", nil, "t")
+
+			Expect(command).To(ContainSubstring("cd '" + filepath.Join(home, "vault") + "'"))
 		})
 	})
 
@@ -410,6 +427,452 @@ var _ = Describe("local backend internals", func() {
 		It("returns empty when there is no frontmatter block at all", func() {
 			Expect(frontmatterSessionID("claude_session_id: abc\n")).To(BeEmpty())
 			Expect(frontmatterSessionID("")).To(BeEmpty())
+		})
+	})
+
+	Describe("frontmatterBlock", func() {
+		It("returns the lines between the delimiters", func() {
+			block, found := frontmatterBlock("---\nlauncher: cc\nrole: agent\n---\n\nBody\n")
+
+			Expect(found).To(BeTrue())
+			Expect(block).To(Equal("launcher: cc\nrole: agent"))
+		})
+
+		It("returns the first block only", func() {
+			block, found := frontmatterBlock("---\na: 1\n---\n\nb: 2\n---\n")
+
+			Expect(found).To(BeTrue())
+			Expect(block).To(Equal("a: 1"))
+		})
+
+		// ⚠️ AN UNTERMINATED BLOCK IS NOT ONE. Reading the rest of the page as YAML would invent
+		// fields out of body text — a task body quoting `launcher:` in prose would become a
+		// launcher.
+		It("reports no block when the delimiter is never closed", func() {
+			_, found := frontmatterBlock("---\nlauncher: cc\n\nBody\n")
+
+			Expect(found).To(BeFalse())
+		})
+
+		It("reports no block when the page does not start with one", func() {
+			_, found := frontmatterBlock("Body\n---\nlauncher: cc\n---\n")
+
+			Expect(found).To(BeFalse())
+			_, found = frontmatterBlock("")
+
+			Expect(found).To(BeFalse())
+		})
+	})
+
+	Describe("parseTaskFrontmatter", func() {
+		// ⚠️ BOTH `goals:` SHAPES ARE IN THE LIVE VAULT, and this is the pair of specs that keeps
+		// them both readable: 2367 files carry the block form and 420 the inline one.
+		It("reads the block goals form", func() {
+			content := "---\ngoals:\n    - '[[Goal A]]'\n    - '[[Goal B]]'\n---\n"
+
+			frontmatter, err := parseTaskFrontmatter(context.Background(), content)
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter.Goals).To(Equal([]string{"Goal A", "Goal B"}))
+		})
+
+		// ⚠️ THE COMMA IS THE REASON THIS IS PARSED AS YAML. A goal name can contain one
+		// ("Supervisor Routes Workers to local, docker or k8s Per Task"), so a reader that split
+		// the inline form on its commas would cut the name in two and look up a goal that does not
+		// exist.
+		It("reads an inline goals form whose entry contains a comma", func() {
+			content := "---\ngoals: ['[[Routes Workers to local, docker or k8s]]']\n---\n"
+
+			frontmatter, err := parseTaskFrontmatter(context.Background(), content)
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter.Goals).To(Equal([]string{"Routes Workers to local, docker or k8s"}))
+		})
+
+		It("reads an empty inline goals list as no goals", func() {
+			frontmatter, err := parseTaskFrontmatter(context.Background(), "---\ngoals: []\n---\n")
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter.Goals).To(BeEmpty())
+		})
+
+		It("reads the launcher and the role", func() {
+			content := "---\nlauncher: cc-private-claude\nrole: manager\n---\n"
+
+			frontmatter, err := parseTaskFrontmatter(context.Background(), content)
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter.Launcher).To(Equal("cc-private-claude"))
+			Expect(frontmatter.Role).To(Equal("manager"))
+		})
+
+		It("unquotes a quoted launcher", func() {
+			frontmatter, err := parseTaskFrontmatter(
+				context.Background(),
+				"---\nlauncher: \"cc-private-claude\"\n---\n",
+			)
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter.Launcher).To(Equal("cc-private-claude"))
+		})
+
+		It("leaves every field empty when the block carries none of them", func() {
+			frontmatter, err := parseTaskFrontmatter(
+				context.Background(),
+				"---\nstatus: in_progress\n---\n\nlauncher: cc\n",
+			)
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter).To(Equal(taskFrontmatter{}))
+		})
+
+		It("leaves every field empty when there is no frontmatter at all", func() {
+			frontmatter, err := parseTaskFrontmatter(context.Background(), "launcher: cc\n")
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter).To(Equal(taskFrontmatter{}))
+		})
+
+		// A malformed block is an error rather than a silent zero value, so the caller can log
+		// what went wrong while still degrading to the documented defaults.
+		It("fails on a frontmatter block that is not valid yaml", func() {
+			_, err := parseTaskFrontmatter(context.Background(), "---\nlauncher: [unclosed\n---\n")
+
+			Expect(err).NotTo(BeNil())
+		})
+	})
+
+	Describe("trimWikilink", func() {
+		It("strips the brackets a wikilink carries", func() {
+			Expect(trimWikilink("[[Goal A]]")).To(Equal("Goal A"))
+			Expect(trimWikilink("  [[Goal A]]  ")).To(Equal("Goal A"))
+		})
+
+		It("leaves a bare name alone", func() {
+			Expect(trimWikilink("Goal A")).To(Equal("Goal A"))
+		})
+	})
+
+	Describe("launcherPath", func() {
+		// The cc-* scripts live side by side, so a bare name resolves beside the vault's own
+		// launcher rather than on PATH.
+		It("resolves a bare name beside the vault launcher", func() {
+			path, err := launcherPath(
+				context.Background(),
+				"/scripts/cc-private",
+				"cc-private-claude",
+			)
+
+			Expect(err).To(BeNil())
+			Expect(path).To(Equal("/scripts/cc-private-claude"))
+		})
+
+		It("uses a value containing a slash as given", func() {
+			path, err := launcherPath(context.Background(), "/scripts/cc-private", "/other/cc")
+
+			Expect(err).To(BeNil())
+			Expect(path).To(Equal("/other/cc"))
+		})
+
+		// A vault launcher with no directory is a bare name itself, and joining against "." would
+		// produce "./cc-private-claude" — a path that happens to work and does not say what it is.
+		It("leaves a bare name alone when the vault launcher is bare too", func() {
+			path, err := launcherPath(context.Background(), "cc-private", "cc-private-claude")
+
+			Expect(err).To(BeNil())
+			Expect(path).To(Equal("cc-private-claude"))
+		})
+
+		// ⚠️ THE SHAPE GUARD IS A TRUST BOUNDARY: frontmatter is worker-writable and the value is
+		// exec'd inside `bash -lc`, so anything a shell could read as syntax is refused rather
+		// than quoted.
+		It("refuses a value carrying shell syntax", func() {
+			for _, value := range []string{
+				"cc; rm -rf /",
+				"cc && curl evil",
+				"$(whoami)",
+				"cc private",
+				"cc\nrm",
+				"~/cc",
+			} {
+				_, err := launcherPath(context.Background(), "/scripts/cc-private", value)
+
+				Expect(err).NotTo(BeNil())
+				Expect(err.Error()).To(ContainSubstring("not a plain script name or path"))
+			}
+		})
+
+		// ⚠️ THE REGEX DOES NOT COVER THIS: `..` is built from characters safeLauncher allows, so
+		// the segment check is what stops a value escaping the launcher directory.
+		It("refuses a parent path segment", func() {
+			for _, value := range []string{"../cc", "../../bin/sh", "/a/../b"} {
+				_, err := launcherPath(context.Background(), "/scripts/cc-private", value)
+
+				Expect(err).NotTo(BeNil())
+				Expect(err.Error()).To(ContainSubstring("path segment"))
+			}
+		})
+
+		// A single dot is not a parent reference, and it names the launcher directory itself —
+		// which the executability check then refuses for being a directory.
+		It("accepts a single dot segment", func() {
+			path, err := launcherPath(context.Background(), "/scripts/cc-private", "./cc")
+
+			Expect(err).To(BeNil())
+			Expect(path).To(Equal("./cc"))
+		})
+	})
+
+	Describe("requireExecutableLauncher", func() {
+		It("accepts an executable file", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "cc")
+			Expect(os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755)).To(BeNil())
+
+			Expect(requireExecutableLauncher(context.Background(), path)).To(BeNil())
+		})
+
+		It("refuses a file that exists but is not executable", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "cc")
+			Expect(os.WriteFile(path, []byte("#!/bin/sh\n"), 0o644)).To(BeNil())
+
+			err := requireExecutableLauncher(context.Background(), path)
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("is not an executable file"))
+		})
+
+		// ⚠️ A DIRECTORY IS REFUSED EVEN THOUGH ITS MODE CARRIES AN EXECUTE BIT, which is the case
+		// a mode check alone would admit.
+		It("refuses a directory", func() {
+			err := requireExecutableLauncher(context.Background(), GinkgoT().TempDir())
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("is not an executable file"))
+		})
+
+		It("refuses a path that does not exist", func() {
+			err := requireExecutableLauncher(
+				context.Background(),
+				filepath.Join(GinkgoT().TempDir(), "absent"),
+			)
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("is not an executable file"))
+		})
+	})
+
+	Describe("goalsDirForVault", func() {
+		It("matches the vault by path and returns its configured goals directory", func() {
+			vaults := []*vaultconfig.Vault{
+				{Path: "/vaults/personal", GoalsDir: "24 Goals"},
+				{Path: "/vaults/family", GoalsDir: "23 Goals"},
+			}
+
+			dir, err := goalsDirForVault(context.Background(), vaults, "/vaults/family")
+
+			Expect(err).To(BeNil())
+			Expect(dir).To(Equal("23 Goals"))
+		})
+
+		// ⚠️ MATCHED ON PATH, NEVER ON NAME, because this backend is configured with a directory
+		// and never learns a vault name. A name match would be the obvious wrong field.
+		It("does not match on the vault name", func() {
+			vaults := []*vaultconfig.Vault{{Name: "family", Path: "/vaults/family"}}
+
+			_, err := goalsDirForVault(context.Background(), vaults, "family")
+
+			Expect(err).NotTo(BeNil())
+		})
+
+		// A trailing slash and a `~` are both spellings of the same directory, and a create must
+		// not lose the goal rule to either.
+		It("tolerates a trailing slash and expands a leading ~", func() {
+			home, err := os.UserHomeDir()
+			Expect(err).To(BeNil())
+			vaults := []*vaultconfig.Vault{
+				{Path: filepath.Join(home, "vaults/personal"), GoalsDir: "24 Goals"},
+			}
+
+			dir, err := goalsDirForVault(context.Background(), vaults, "~/vaults/personal/")
+
+			Expect(err).To(BeNil())
+			Expect(dir).To(Equal("24 Goals"))
+		})
+
+		It("fails when no entry names the vault", func() {
+			_, err := goalsDirForVault(
+				context.Background(),
+				[]*vaultconfig.Vault{{Path: "/vaults/other"}},
+				"/vaults/personal",
+			)
+
+			Expect(err).NotTo(BeNil())
+		})
+	})
+
+	Describe("goalsDir", func() {
+		// ⚠️ THE FALLBACK IS THE POINT: an unresolvable goals directory must cost the goal rule,
+		// never a create. A wrong one is not a visible failure — it just means the worker opens on
+		// the vault default, which is the silent drop this change exists to remove.
+		It("falls back to the default when no vault-cli entry names the vault", func() {
+			backend := &localBackend{
+				config: LocalConfig{VaultDir: filepath.Join(GinkgoT().TempDir(), "absent")},
+			}
+
+			Expect(backend.goalsDir(context.Background())).To(Equal(DefaultLocalGoalsDir))
+		})
+	})
+
+	Describe("validateRole", func() {
+		It("accepts the three roles the fleet uses", func() {
+			for _, role := range []string{"manager", "agent", "human"} {
+				value, err := validateRole(context.Background(), role)
+
+				Expect(err).To(BeNil())
+				Expect(value).To(Equal(role))
+			}
+		})
+
+		// ⚠️ AN ABSENT ROLE IS `agent`, WHICH IS WHAT KEEPS EVERY TASK THAT HAS NEVER DECLARED ONE
+		// ON THE BEHAVIOUR IT HAD BEFORE.
+		It("defaults an absent role to agent", func() {
+			for _, role := range []string{"", "   "} {
+				value, err := validateRole(context.Background(), role)
+
+				Expect(err).To(BeNil())
+				Expect(value).To(Equal("agent"))
+			}
+		})
+
+		// ⚠️ REFUSED RATHER THAN DEFAULTED: a worker opened in the wrong window with the wrong
+		// colour is discovered only by noticing it.
+		It("refuses a role that is not one of the three", func() {
+			for _, role := range []string{"worker", "Agent", "hold", "agents", "manager,agent"} {
+				_, err := validateRole(context.Background(), role)
+
+				Expect(err).NotTo(BeNil())
+				Expect(err.Error()).To(ContainSubstring("is not a role"))
+			}
+		})
+
+		// The comparison is case-SENSITIVE and the value is TRIMMED, which is the supervisor's own
+		// rule (server/role-map.mjs trims, then matches against the three literals). A padded role
+		// is therefore a real role and not a typo.
+		It("trims surrounding whitespace before matching", func() {
+			value, err := validateRole(context.Background(), "  manager  ")
+
+			Expect(err).To(BeNil())
+			Expect(value).To(Equal("manager"))
+		})
+	})
+
+	Describe("roleFromMap", func() {
+		// The two vocabularies are deliberately different: the window is named for its purpose.
+		It("maps a role to its window's chip and id", func() {
+			orange, cyan, pink := "orange", "cyan", "pink"
+			zero, one, two := 0, 1, 2
+			entries := roleMap{
+				"Managers": {Chip: &orange, WindowID: &zero},
+				"Direct":   {Chip: &cyan, WindowID: &one},
+				"Agents":   {Chip: &pink, WindowID: &two},
+			}
+
+			Expect(roleFromMap("manager", entries)).To(Equal(
+				resolvedRole{Role: "manager", Chip: "orange", WindowID: "0", Resolved: true},
+			))
+			Expect(roleFromMap("agent", entries)).To(Equal(
+				resolvedRole{Role: "agent", Chip: "pink", WindowID: "2", Resolved: true},
+			))
+			Expect(roleFromMap("human", entries)).To(Equal(
+				resolvedRole{Role: "human", Chip: "cyan", WindowID: "1", Resolved: true},
+			))
+		})
+
+		// ⚠️ A NULL CHIP IS A REAL ANSWER, NOT AN ABSENT ONE. The live map publishes
+		// `"Hold": {"chip": null}`; reading that as "no chip published" is what makes the caller
+		// send nothing rather than a default colour.
+		It("resolves the window with no chip when the entry publishes a null chip", func() {
+			two := 2
+			entries := roleMap{"Agents": {Chip: nil, WindowID: &two}}
+
+			Expect(roleFromMap("agent", entries)).To(Equal(
+				resolvedRole{Role: "agent", WindowID: "2", Resolved: true},
+			))
+		})
+
+		// ⚠️ AN ABSENT window_id MUST NOT READ AS WINDOW 0, WHICH IS THE MANAGERS WINDOW.
+		It("reports unresolved when the entry carries no window id", func() {
+			pink := "pink"
+			entries := roleMap{"Agents": {Chip: &pink}}
+
+			Expect(roleFromMap("agent", entries)).To(Equal(resolvedRole{Role: "agent"}))
+		})
+
+		It("reports unresolved when the map has no entry for the window", func() {
+			Expect(roleFromMap("agent", roleMap{})).To(Equal(resolvedRole{Role: "agent"}))
+		})
+	})
+
+	Describe("readRoleMap", func() {
+		It("reads the chip and window id of each entry", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "wezterm-role-map.json")
+			Expect(os.WriteFile(path, []byte(
+				`{"Agents": {"chip": "pink", "window_id": 2}, "Hold": {"chip": null, "window_id": 3}}`,
+			), 0o600)).To(BeNil())
+
+			entries, err := readRoleMap(context.Background(), path)
+
+			Expect(err).To(BeNil())
+			Expect(entries).To(HaveLen(2))
+			Expect(*entries["Agents"].Chip).To(Equal("pink"))
+			Expect(*entries["Agents"].WindowID).To(Equal(2))
+			Expect(entries["Hold"].Chip).To(BeNil())
+			Expect(*entries["Hold"].WindowID).To(Equal(3))
+		})
+
+		It("fails on a file that is not the role map", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "wezterm-role-map.json")
+			Expect(os.WriteFile(path, []byte("not json"), 0o600)).To(BeNil())
+
+			_, err := readRoleMap(context.Background(), path)
+
+			Expect(err).NotTo(BeNil())
+		})
+
+		It("fails on a role map that does not exist", func() {
+			_, err := readRoleMap(
+				context.Background(),
+				filepath.Join(GinkgoT().TempDir(), "absent.json"),
+			)
+
+			Expect(err).NotTo(BeNil())
+		})
+	})
+
+	Describe("composerEmpty", func() {
+		// ⚠️ THE GLYPH ALONE IS NOT READINESS. The TUI paints the composer with a placeholder
+		// suggestion before it will honour a submit, and a message sent into that phase is accepted
+		// and then swallowed.
+		It("reports a drawn, empty composer as ready", func() {
+			Expect(composerEmpty("some output\n❯ \n")).To(BeTrue())
+			Expect(composerEmpty("❯")).To(BeTrue())
+		})
+
+		It("reports a composer holding text as not ready", func() {
+			Expect(composerEmpty("❯ hello")).To(BeFalse())
+			Expect(composerEmpty("❯ Try \"fix lint errors\"")).To(BeFalse())
+		})
+
+		It("reports a pane with no composer at all as not ready", func() {
+			Expect(composerEmpty("")).To(BeFalse())
+			Expect(composerEmpty("no prompt here\n")).To(BeFalse())
+		})
+
+		// The composer is the LAST line the glyph starts: every echoed submitted prompt above it
+		// carries the same glyph, so position — not the glyph alone — identifies it.
+		It("reads the composer as the last prompt line", func() {
+			Expect(composerLine("❯ first\noutput\n❯ second")).To(Equal("❯ second"))
+			Expect(composerLine("no prompt")).To(BeEmpty())
 		})
 	})
 })
