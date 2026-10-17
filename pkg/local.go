@@ -956,6 +956,14 @@ func (b *localBackend) awaitLivePane(ctx context.Context, guiID string, paneID s
 	for {
 		live, err := b.livePaneIDs(ctx, guiID)
 		if err != nil {
+			// ⚠️ A CHECK THAT FAILED IS NOT A PANE THAT DIED, AND THE DIFFERENCE DECIDES WHETHER
+			// THE PANE IS CLOSED. A failed pane listing says nothing about this pane — it may be
+			// perfectly alive — so returning here would leave a live tab that no caller was told
+			// about, that `stop` cannot reach (it resolves ownership from the store, which has no
+			// entry), and that a retry of the same create would duplicate, because the retry
+			// finds no entry for the task and passes the dedup. That is the same hazard
+			// recordWorker closes a pane for, so it is closed here too.
+			b.closeUnrecordedPane(ctx, guiID, paneID)
 			return err
 		}
 		if !live[paneID] {
@@ -963,15 +971,43 @@ func (b *localBackend) awaitLivePane(ctx context.Context, guiID string, paneID s
 			// the substring a caller matches on and the one the criterion names, so an id
 			// interpolated between the words — `pane "pane-1001" exited immediately` — would
 			// read as the same sentence to a human and fail every substring match.
+			//
+			// ⚠️ THIS IS THE ONE FAILURE THAT CLOSES NOTHING, AND THAT IS WHY IT IS THE ONE THE
+			// CALLER MAY RETRY BLINDLY. The pane is already absent, so there is no tab to clean
+			// up and no second tab a retry could open.
 			return errors.Errorf(ctx, "pane exited immediately: %q", paneID)
 		}
 		select {
 		case <-ctx.Done():
+			// Same reasoning as the failed listing above: a cancelled wait reaches no verdict,
+			// so the pane is closed rather than left behind unrecorded.
+			b.closeUnrecordedPane(ctx, guiID, paneID)
 			return errors.Wrapf(ctx, ctx.Err(), "await worker pane %q", paneID)
 		case <-deadline.C:
 			return nil
 		case <-ticker.C:
 		}
+	}
+}
+
+// closeUnrecordedPane closes a pane a create has decided not to record.
+//
+// ⚠️ IT EXISTS SO A PANE IS NEVER LEFT OPEN AND UNRECORDED, AND IT MIRRORS recordWorker'S OWN
+// CLEANUP FOR EXACTLY THAT REASON. The store is the only thing that makes a pane stoppable —
+// Stop resolves ownership from it and refuses an id it does not hold — so a pane missing from
+// the store is a live tab no caller was told about, no stop can reach, and any retry of the same
+// create would duplicate, because that retry finds no entry for the task and passes the dedup.
+//
+// ⚠️ A FAILED KILL IS LOGGED, NOT RETURNED. The caller is already on an error path carrying an
+// error of its own, and replacing it would lose the reason the create failed; the pane id goes
+// into the log so an operator can close the tab by hand.
+func (b *localBackend) closeUnrecordedPane(ctx context.Context, guiID string, paneID string) {
+	if err := b.client.KillPane(ctx, guiID, paneID); err != nil {
+		slog.Warn(
+			"close unrecorded worker pane failed",
+			"pane", paneID,
+			"error", err,
+		)
 	}
 }
 
