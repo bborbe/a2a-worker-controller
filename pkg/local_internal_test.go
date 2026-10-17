@@ -62,6 +62,22 @@ var _ = Describe("local backend internals", func() {
 		})
 	})
 
+	Describe("firstLine", func() {
+		// ⚠️ A SIZE BOUND, NOT A REDACTION, and the two are deliberately separate concerns:
+		// describeArgs drops the caller's environment, while this keeps wezterm's own
+		// diagnostic — which is not caller-controlled — from being persisted in full by the
+		// log and by Sentry.
+		It("keeps only the first non-empty line", func() {
+			Expect(firstLine("window not found\nstack line\n")).To(Equal("window not found"))
+			Expect(firstLine("\n\n  leading blanks  \nsecond\n")).To(Equal("leading blanks"))
+		})
+
+		It("returns the empty string when there is nothing to keep", func() {
+			Expect(firstLine("")).To(Equal(""))
+			Expect(firstLine("\n \n\t\n")).To(Equal(""))
+		})
+	})
+
 	Describe("envWithSocket", func() {
 		// ⚠️ LOAD-BEARING, AND THE REASON THE RULE EXISTS: a duplicate key leaves the FIRST entry
 		// winning in the child's own getenv, so appending would keep a stale socket — the mux

@@ -332,7 +332,7 @@ func (c *execWeztermClient) run(ctx context.Context, args []string) (string, err
 			err,
 			"wezterm %s failed: %s",
 			describeArgs(args),
-			strings.TrimSpace(stderr.String()),
+			firstLine(stderr.String()),
 		)
 	}
 	return stdout.String(), nil
@@ -351,6 +351,24 @@ func describeArgs(args []string) string {
 		}
 	}
 	return strings.Join(args, " ")
+}
+
+// firstLine returns the first non-empty line of s, trimmed, or the empty string.
+//
+// ⚠️ WEZTERM'S STDERR IS DELIBERATELY REDUCED TO ONE LINE HERE. This text is joined into an
+// error that the executor logs and that Sentry captures, so an unbounded diagnostic is
+// persisted in full — while the line that actually names the failure ("window not found") is
+// the first one, and the remainder is context that need not outlive the request. The stderr is
+// wezterm's own output rather than caller-controlled, so this is a size bound rather than the
+// redaction `describeArgs` performs; the two are separate concerns and neither replaces the
+// other.
+func firstLine(s string) string {
+	for _, line := range strings.Split(s, "\n") {
+		if trimmed := strings.TrimSpace(line); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // weztermPane is the part of `wezterm cli list --format json` this backend reads. The list
