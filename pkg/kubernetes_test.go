@@ -293,3 +293,100 @@ var _ = Describe("KubernetesBackend", func() {
 		})
 	})
 })
+
+var _ = Describe("KubernetesBackend with declared secrets", func() {
+	var (
+		ctx      context.Context
+		client   *mocks.PkgKubernetesClient
+		resolver *mocks.PkgTeamVaultResolver
+		backend  pkg.WorkerBackend
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		client = &mocks.PkgKubernetesClient{}
+		template := templateConfig()
+		client.GetConfigReturns(&template, nil)
+		secret := templateSecret()
+		client.GetSecretReturns(&secret, nil)
+		client.CreateConfigStub = func(
+			_ context.Context,
+			config *agentv1.Config,
+		) (*agentv1.Config, error) {
+			stored := config.DeepCopy()
+			stored.UID = testCreatedUID
+			return stored, nil
+		}
+		resolver = &mocks.PkgTeamVaultResolver{}
+		resolver.ResolveReturns("resolved-canary", nil)
+		backend = pkg.NewKubernetesBackend(
+			client,
+			pkg.NewWorkerResourceBuilder(testKubernetesConfig()),
+			testTemplateName,
+			resolver,
+		)
+	})
+
+	// ⚠️ THE RESOLVED VALUE MUST REACH THE SECRET AND NEVER THE CONFIG. The Config CRD's spec.Env
+	// is a literal map[string]string, so a value written there would be durable in etcd and
+	// readable by anything that can read a Config — which is the exposure the Secret route exists
+	// to avoid. This spec is the one that would catch a regression to the spec.Env shape.
+	It("writes the resolved value into the worker Secret, never into the Config", func() {
+		_, err := backend.Create(ctx, pkg.CreateRequest{
+			Task:    "Build the k3s Backend",
+			Secrets: []pkg.Secret{{Name: "GATEWAY_SECRET", TeamVaultKey: "9L6eMO"}},
+		})
+		Expect(err).To(BeNil())
+
+		Expect(resolver.ResolveCallCount()).To(Equal(1))
+		_, key := resolver.ResolveArgsForCall(0)
+		Expect(key).To(Equal("9L6eMO"))
+
+		_, secret := client.CreateSecretArgsForCall(0)
+		Expect(secret.Data["GATEWAY_SECRET"]).To(Equal([]byte("resolved-canary")))
+
+		_, config := client.CreateConfigArgsForCall(0)
+		for _, value := range config.Spec.Env {
+			Expect(value).NotTo(ContainSubstring("resolved-canary"))
+		}
+	})
+
+	// A worker started without a mount it declared looks healthy and fails at its first file
+	// access, so the refusal has to happen before anything is written.
+	It("refuses a declared mount rather than serving a worker without it", func() {
+		_, err := backend.Create(ctx, pkg.CreateRequest{
+			Task:   "Build the k3s Backend",
+			Mounts: []pkg.Mount{{HostPath: "/srv/data", ContainerPath: "/vault"}},
+		})
+		Expect(err).NotTo(BeNil())
+		Expect(err.Error()).To(ContainSubstring("mount"))
+		Expect(client.CreateConfigCallCount()).To(Equal(0))
+	})
+
+	It("refuses a declared secret when no resolver is configured", func() {
+		backend = pkg.NewKubernetesBackend(
+			client,
+			pkg.NewWorkerResourceBuilder(testKubernetesConfig()),
+			testTemplateName,
+			nil,
+		)
+		_, err := backend.Create(ctx, pkg.CreateRequest{
+			Task:    "Build the k3s Backend",
+			Secrets: []pkg.Secret{{Name: "GATEWAY_SECRET", TeamVaultKey: "9L6eMO"}},
+		})
+		Expect(err).NotTo(BeNil())
+		Expect(client.CreateConfigCallCount()).To(Equal(0))
+	})
+
+	// A TeamVault outage must leave the cluster untouched rather than a Config whose owner has no
+	// Secret behind it.
+	It("writes no Config when TeamVault cannot resolve the key", func() {
+		resolver.ResolveReturns("", errors.New("no such key"))
+		_, err := backend.Create(ctx, pkg.CreateRequest{
+			Task:    "Build the k3s Backend",
+			Secrets: []pkg.Secret{{Name: "GATEWAY_SECRET", TeamVaultKey: "9L6eMO"}},
+		})
+		Expect(err).NotTo(BeNil())
+		Expect(client.CreateConfigCallCount()).To(Equal(0))
+	})
+})

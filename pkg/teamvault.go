@@ -32,6 +32,8 @@ const TeamVaultConfigEnv = "TEAMVAULT_CONFIG"
 // controller adds no second auth path to keep in step.
 const TeamVaultCommand = "teamvault-cli"
 
+//counterfeiter:generate -o ../mocks/pkg-team-vault-resolver.go --fake-name PkgTeamVaultResolver . TeamVaultResolver
+
 // TeamVaultResolver resolves a TeamVault lookup key to the secret it names.
 type TeamVaultResolver interface {
 	// Resolve returns the value for key. The returned value is a secret: it must never be
