@@ -97,6 +97,14 @@ type sendCall struct {
 	paneID string
 	text   string
 	marker string
+	// deadline is how much time the context the caller handed the send had left when it arrived, or
+	// zero when that context carried no deadline at all.
+	//
+	// ⚠️ IT IS RECORDED BECAUSE THE BOUND IS A PROPERTY OF THE CALL SITE AND IS INVISIBLE OTHERWISE.
+	// applyRoleColor wraps its send in a deadline of its own so a slow pane cannot hold the backend's
+	// mutex indefinitely, and a fake that ignored the context could not show it — the alternative
+	// would be a spec that waits the real timeout out, which the suite cannot afford.
+	deadline time.Duration
 }
 
 // fakeWeztermClient is the injected WeztermClient seam. It records every spawn and every kill
@@ -201,13 +209,23 @@ func (f *fakeWeztermClient) GuiID(_ context.Context) (string, error) {
 // spec asserts what the backend ASKED FOR rather than re-testing the confirmation loop, which the
 // internal specs cover directly.
 func (f *fakeWeztermClient) SendText(
-	_ context.Context,
+	ctx context.Context,
 	guiID string,
 	paneID string,
 	text string,
 	marker string,
 ) error {
-	f.sent = append(f.sent, sendCall{guiID: guiID, paneID: paneID, text: text, marker: marker})
+	var remaining time.Duration
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining = time.Until(deadline)
+	}
+	f.sent = append(f.sent, sendCall{
+		guiID:    guiID,
+		paneID:   paneID,
+		text:     text,
+		marker:   marker,
+		deadline: remaining,
+	})
 	return f.sendErr
 }
 
@@ -925,6 +943,36 @@ var _ = Describe("LocalBackend", func() {
 			Expect(response.LauncherSource).To(Equal("task"))
 		})
 
+		// ⚠️ THE STAT AND THE EXEC MUST NAME THE SAME FILE, AND THIS SPEC IS WHAT PINS IT. tabCommand
+		// builds `cd <vaultDir> && exec <launcher>`, so the TAB resolves a relative launcher against
+		// the VAULT directory, while the executability check resolves the same string against the
+		// CONTROLLER PROCESS's working directory. A launcher written relative to the vault — which is
+		// exactly what a path-qualified value is — was therefore stat'ed at a path the exec never ran:
+		// refused for a file the exec would have found, or, the other way round, admitted for one it
+		// would not. The launcher here exists ONLY under the vault, so without the fix the check fails
+		// with "is not an executable file" while the tab command would have worked.
+		It(
+			"resolves a relative launcher against the vault directory, where the tab execs it",
+			func() {
+				Expect(os.WriteFile(
+					filepath.Join(vault, "cc-relative"),
+					[]byte("#!/bin/sh\n"),
+					0o755,
+				)).To(BeNil())
+				writePage(task, "launcher: ./cc-relative")
+
+				response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+				Expect(err).To(BeNil())
+				Expect(response.Launcher).To(Equal(filepath.Join(vault, "cc-relative")))
+				Expect(response.LauncherSource).To(Equal("task"))
+				// The tab execs the same absolute path the check stat'ed, so the two cannot drift apart.
+				Expect(client.spawns[0].inner).To(ContainSubstring(
+					"exec '" + filepath.Join(vault, "cc-relative") + "'",
+				))
+			},
+		)
+
 		It("runs the launcher a goal names when the task names none", func() {
 			launcher := writeLauncher("cc-private-claude")
 			writeGoal("A Goal With A Launcher", launcher)
@@ -936,6 +984,37 @@ var _ = Describe("LocalBackend", func() {
 			Expect(response.Launcher).To(Equal(launcher))
 			Expect(response.LauncherSource).To(Equal("goal"))
 			Expect(client.spawns[0].inner).To(ContainSubstring("exec '" + launcher + "'"))
+		})
+
+		// ⚠️ A PATH-QUALIFIED GOAL LINK IS A REAL VAULT SHAPE, NOT A TYPO: 11 live tasks in `25 Tasks`
+		// carry one — `goals: - "[[24 Goals/Build Security Review Agent]]"` and
+		// `[[25 Tasks/Return to Live Trading]]` among them, measured 2026-10-18. It resolves against
+		// the VAULT ROOT, so a rule that refused the separator made the goal rule skip and the worker
+		// open on the vault default: the exact silent drop this feature exists to remove.
+		It("resolves a path-qualified goal link against the vault root", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writeGoal("A Goal With A Launcher", launcher)
+			writePage(task, "goals:", "    - '[[24 Goals/A Goal With A Launcher]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("goal"))
+		})
+
+		// The other live shape points into `25 Tasks`, and it resolves by the same rule: the path is
+		// relative to the vault root, whichever numbered folder it names.
+		It("resolves a path-qualified goal link that points into the tasks directory", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writePage(pkg.TaskName("Return to Live Trading"), "launcher: "+launcher)
+			writePage(task, "goals:", "    - '[[25 Tasks/Return to Live Trading]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("goal"))
 		})
 
 		// The inline flow form is what 420 files in the live vault carry, and a goal name can
@@ -952,20 +1031,46 @@ var _ = Describe("LocalBackend", func() {
 			Expect(response.LauncherSource).To(Equal("goal"))
 		})
 
+		// ⚠️ THE SCALAR SHAPE IS IN THE LIVE VAULT TOO — `goals: '[[Restore Trading Profitability
+		// 2026Q2]]'`, two files measured 2026-10-18 — and a reader that required a LIST dropped the
+		// goal entirely, falling through to the vault launcher for a task that did name one.
+		It("reads a scalar goals value as a one-entry list", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writeGoal("A Goal With A Launcher", launcher)
+			writePage(task, "goals: '[[A Goal With A Launcher]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("goal"))
+		})
+
 		// ⚠️ A TASK NAMING ITS OWN LAUNCHER NEVER READS ITS GOALS, so a goal that cannot be
 		// resolved cannot refuse a spawn the precedence says should open.
+		//
+		// ⚠️ THE GOALS HERE NAME TWO DIFFERENT LAUNCHERS, AND THAT IS WHAT MAKES THE SPEC
+		// DISCRIMINATING. Naming one that merely does not exist proves nothing: a reader that read
+		// the goals first would skip the missing file and still answer with the task's own launcher,
+		// so the spec passed either way. Two goals naming different launchers is the input a
+		// read-the-goals-first path REFUSES — "different launchers" — so only a code path that
+		// honours the task's own launcher without consulting them can succeed here.
 		It("does not read the goals when the task names its own launcher", func() {
 			launcher := writeLauncher("cc-private-claude")
+			writeGoal("Goal A", writeLauncher("cc-a"))
+			writeGoal("Goal B", writeLauncher("cc-b"))
 			writePage(
 				task,
 				"launcher: "+launcher,
 				"goals:",
-				"    - '[[A Goal That Does Not Exist]]'",
+				"    - '[[Goal A]]'",
+				"    - '[[Goal B]]'",
 			)
 
 			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
 
 			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
 			Expect(response.LauncherSource).To(Equal("task"))
 		})
 
@@ -1032,6 +1137,23 @@ var _ = Describe("LocalBackend", func() {
 				Expect(err.Error()).To(ContainSubstring("not a plain script name or path"))
 				Expect(response).To(BeNil())
 			}
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		// ⚠️ THE GUARD APPLIES TO A GOAL'S LAUNCHER TOO, AND A GOAL IS THE EASIER PLACE TO MISS IT.
+		// The value is read out of a DIFFERENT file from the one the caller named, so it is the
+		// default route for any task that declares no launcher of its own — and goalLauncher
+		// shape-checks each value BEFORE counting, so an unsafe one is refused for what it IS rather
+		// than losing a count comparison to a sibling goal.
+		It("refuses a goal whose launcher carries shell syntax", func() {
+			writeGoal("A Goal With An Unsafe Launcher", "cc-private; rm -rf /")
+			writePage(task, "goals:", "    - '[[A Goal With An Unsafe Launcher]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("not a plain script name or path"))
+			Expect(response).To(BeNil())
 			Expect(client.spawns).To(BeEmpty())
 		})
 
@@ -1184,11 +1306,15 @@ var _ = Describe("LocalBackend", func() {
 		// whatever window the spawning process happens to be associated with.
 		It("falls back to the configured window when the role map is missing", func() {
 			Expect(os.Remove(roleMapPath)).To(BeNil())
+			// ⚠️ testLivenessFloor IS CONFIGURED HERE LIKE EVERY OTHER SPEC. Leaving it out does not
+			// fail — it silently pays the shipped 1500ms default, so this one spec costs the suite
+			// more than the rest of the file combined.
 			windowed := pkg.NewLocalBackend(client, failing, pkg.LocalConfig{
-				VaultDir:     vault,
-				ClaudeScript: testClaudeScript,
-				WindowID:     "7",
-				RoleMapPath:  roleMapPath,
+				VaultDir:      vault,
+				ClaudeScript:  testClaudeScript,
+				WindowID:      "7",
+				LivenessFloor: testLivenessFloor,
+				RoleMapPath:   roleMapPath,
 			})
 
 			response, err := windowed.Create(ctx, pkg.CreateRequest{Task: task})
@@ -1236,6 +1362,37 @@ var _ = Describe("LocalBackend", func() {
 			Expect(err).To(BeNil())
 			Expect(client.spawns[0].windowID).To(Equal("2"))
 			Expect(client.sent).To(BeEmpty())
+		})
+
+		// ⚠️ THE CHIP IS TYPED INTO A LIVE PANE, SO A VALUE THAT IS NOT A PLAIN COLOUR NAME IS
+		// REFUSED RATHER THAN SENT. The send appends a trailing `\r`, so a chip carrying a newline
+		// would submit a second line the caller never wrote. The worker is still recorded — the
+		// colour is cosmetic — but nothing is typed.
+		It("sends no colour when the role map's chip is not a plain colour name", func() {
+			Expect(os.WriteFile(roleMapPath, []byte(
+				`{"Agents": {"chip": "pink\nrm -rf /", "window_id": 2}}`,
+			), 0o600)).To(BeNil())
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Worker.PaneID).To(Equal("pane-1001"))
+			Expect(client.sent).To(BeEmpty())
+		})
+
+		// ⚠️ THE COLOUR STEP IS BOUNDED, AND THIS IS WHERE THE BOUND IS VISIBLE WITHOUT WAITING IT OUT.
+		// Create applies the colour while holding the backend's mutex, and the send's own polls can
+		// sum to ~11s, so a cosmetic step could otherwise serialize every other call. The fake records
+		// the deadline the caller handed it; a call site that dropped the deadline would record zero.
+		It("bounds the colour send with a deadline of its own", func() {
+			writeAgentMap()
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(client.sent).To(HaveLen(1))
+			Expect(client.sent[0].deadline).To(BeNumerically(">", 0))
+			Expect(client.sent[0].deadline).To(BeNumerically("<=", 10*time.Second))
 		})
 
 		// ⚠️ A COLOUR THAT FAILS TO APPLY IS LOGGED AND NON-FATAL: the worker still has its task,

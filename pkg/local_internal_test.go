@@ -465,8 +465,8 @@ var _ = Describe("local backend internals", func() {
 	})
 
 	Describe("parseTaskFrontmatter", func() {
-		// ⚠️ BOTH `goals:` SHAPES ARE IN THE LIVE VAULT, and this is the pair of specs that keeps
-		// them both readable: 2367 files carry the block form and 420 the inline one.
+		// ⚠️ ALL THREE `goals:` SHAPES ARE IN THE LIVE VAULT, and this is the trio of specs that keeps
+		// them readable: 2367 files carry the block form, 420 the inline one, and two a bare scalar.
 		It("reads the block goals form", func() {
 			content := "---\ngoals:\n    - '[[Goal A]]'\n    - '[[Goal B]]'\n---\n"
 
@@ -491,6 +491,38 @@ var _ = Describe("local backend internals", func() {
 
 		It("reads an empty inline goals list as no goals", func() {
 			frontmatter, err := parseTaskFrontmatter(context.Background(), "---\ngoals: []\n---\n")
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter.Goals).To(BeEmpty())
+		})
+
+		// ⚠️ THE SCALAR FORM IS THE THIRD SHAPE, AND IT IS A REAL ONE: two live files write
+		// `goals: '[[Restore Trading Profitability 2026Q2]]'` rather than a list, measured
+		// 2026-10-18. Requiring []any dropped the goal, and a task that names a goal but resolves as
+		// though it named none falls through to the vault launcher.
+		It("reads a scalar goals value as a one-entry list", func() {
+			content := "---\ngoals: '[[Restore Trading Profitability 2026Q2]]'\n---\n"
+
+			frontmatter, err := parseTaskFrontmatter(context.Background(), content)
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter.Goals).To(Equal([]string{"Restore Trading Profitability 2026Q2"}))
+		})
+
+		It("reads a bare scalar goals value as a one-entry list", func() {
+			frontmatter, err := parseTaskFrontmatter(
+				context.Background(),
+				"---\ngoals: A Goal\n---\n",
+			)
+
+			Expect(err).To(BeNil())
+			Expect(frontmatter.Goals).To(Equal([]string{"A Goal"}))
+		})
+
+		// An empty scalar is not a goal: it degrades to "no entries" like the other malformed shapes
+		// rather than to an entry that names nothing.
+		It("reads an empty scalar goals value as no goals", func() {
+			frontmatter, err := parseTaskFrontmatter(context.Background(), "---\ngoals: ''\n---\n")
 
 			Expect(err).To(BeNil())
 			Expect(frontmatter.Goals).To(BeEmpty())
@@ -613,9 +645,13 @@ var _ = Describe("local backend internals", func() {
 			}
 		})
 
-		// A single dot is not a parent reference, and it names the launcher directory itself —
-		// which the executability check then refuses for being a directory.
-		It("accepts a single dot segment", func() {
+		// ⚠️ A SINGLE DOT IS NOT A PARENT REFERENCE, AND `./cc` NAMES A FILE RATHER THAN A DIRECTORY —
+		// the earlier caption here claimed the executability check then refused it for being a
+		// directory, and that was simply wrong: `./cc` is a path to a file in the launcher directory,
+		// and what the check does with it depends on the file, not on the `.`. It is accepted here,
+		// and it stays relative at this layer — chooseLauncher is what resolves it against the vault
+		// directory, because that is where the tab's `exec` resolves it.
+		It("accepts a single dot segment, which is a file path and not a parent reference", func() {
 			path, err := launcherPath(context.Background(), "/scripts/cc-private", "./cc")
 
 			Expect(err).To(BeNil())
@@ -658,6 +694,113 @@ var _ = Describe("local backend internals", func() {
 
 			Expect(err).NotTo(BeNil())
 			Expect(err.Error()).To(ContainSubstring("is not an executable file"))
+		})
+	})
+
+	Describe("readGoalLauncher", func() {
+		// writeGoalPage puts a goal file at <vault>/<dir>/<name>.md carrying the launcher line.
+		writeGoalPage := func(vault string, dir string, name string, launcher string) {
+			Expect(os.MkdirAll(filepath.Join(vault, dir), 0o750)).To(BeNil())
+			Expect(os.WriteFile(
+				filepath.Join(vault, dir, name+".md"),
+				[]byte("---\nlauncher: "+launcher+"\n---\n"),
+				0o600,
+			)).To(BeNil())
+		}
+
+		// The two resolution bases are the whole point of this function's name validation: a bare
+		// name is a goal in the goals directory, and a name containing a `/` is a PATH-QUALIFIED
+		// wikilink relative to the vault root.
+		It("resolves a bare name against the goals directory", func() {
+			vault := GinkgoT().TempDir()
+			writeGoalPage(vault, "24 Goals", "A Goal", "/scripts/cc-goal")
+
+			launcher, err := readGoalLauncher(context.Background(), vault, "24 Goals", "A Goal")
+
+			Expect(err).To(BeNil())
+			Expect(launcher).To(Equal("/scripts/cc-goal"))
+		})
+
+		// ⚠️ THE SHAPE 11 LIVE TASKS CARRY: `[[24 Goals/Build Security Review Agent]]`. The name
+		// already names the goals directory, so prefixing goalsDir again would look for
+		// `24 Goals/24 Goals/…` and find nothing — the same silent drop, one layer down.
+		It("resolves a path-qualified name against the vault root", func() {
+			vault := GinkgoT().TempDir()
+			writeGoalPage(vault, "24 Goals", "A Goal", "/scripts/cc-goal")
+
+			launcher, err := readGoalLauncher(
+				context.Background(),
+				vault,
+				"24 Goals",
+				"24 Goals/A Goal",
+			)
+
+			Expect(err).To(BeNil())
+			Expect(launcher).To(Equal("/scripts/cc-goal"))
+		})
+
+		// The other live shape points into the tasks directory — `[[25 Tasks/Return to Live Trading]]`
+		// — and it resolves by the same rule: relative to the vault root, whichever folder it names.
+		It("resolves a path-qualified name that points outside the goals directory", func() {
+			vault := GinkgoT().TempDir()
+			writeGoalPage(vault, "25 Tasks", "Return to Live Trading", "/scripts/cc-task")
+
+			launcher, err := readGoalLauncher(
+				context.Background(),
+				vault,
+				"24 Goals",
+				"25 Tasks/Return to Live Trading",
+			)
+
+			Expect(err).To(BeNil())
+			Expect(launcher).To(Equal("/scripts/cc-task"))
+		})
+
+		It("answers empty when the goal records no launcher", func() {
+			vault := GinkgoT().TempDir()
+			Expect(os.MkdirAll(filepath.Join(vault, "24 Goals"), 0o750)).To(BeNil())
+			Expect(os.WriteFile(
+				filepath.Join(vault, "24 Goals", "Bare.md"),
+				[]byte("---\npage_type: goal\n---\n"),
+				0o600,
+			)).To(BeNil())
+
+			launcher, err := readGoalLauncher(context.Background(), vault, "24 Goals", "Bare")
+
+			Expect(err).To(BeNil())
+			Expect(launcher).To(BeEmpty())
+		})
+
+		// ⚠️ ALLOWING THE SEPARATOR DID NOT ALLOW LEAVING THE VAULT. The name becomes a path, so the
+		// escapes a path admits — a `..` segment, an absolute path, a backslash — are still refused,
+		// and the empty name with them.
+		It("refuses a name that escapes the vault or names an absolute path", func() {
+			vault := GinkgoT().TempDir()
+			for _, name := range []string{
+				"../outside",
+				"24 Goals/../../outside",
+				"24 Goals/..",
+				"/etc/passwd",
+				`24 Goals\A Goal`,
+				"",
+			} {
+				_, err := readGoalLauncher(context.Background(), vault, "24 Goals", name)
+
+				Expect(err).NotTo(BeNil())
+				Expect(err.Error()).To(ContainSubstring("not a valid goal name"))
+			}
+		})
+
+		It("fails when the goal file does not exist", func() {
+			_, err := readGoalLauncher(
+				context.Background(),
+				GinkgoT().TempDir(),
+				"24 Goals",
+				"Absent",
+			)
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("read goal file"))
 		})
 	})
 
@@ -720,6 +863,39 @@ var _ = Describe("local backend internals", func() {
 			}
 
 			Expect(backend.goalsDir(context.Background())).To(Equal(DefaultLocalGoalsDir))
+		})
+	})
+
+	Describe("vaultDirHasDir", func() {
+		// ⚠️ THIS IS THE SEAM THAT CATCHES A CONFIGURED GOALS DIRECTORY WHICH IS SIMPLY NOT THERE.
+		// vault-cli's GetGoalsDir answers its own default of `Goals` when an entry declares none, and
+		// a numbered-folder vault has no such directory — so the goal rule would find nothing and
+		// fall through to the vault launcher with no warning that anything was wrong.
+		It("reports a directory that exists", func() {
+			vault := GinkgoT().TempDir()
+			Expect(os.MkdirAll(filepath.Join(vault, "24 Goals"), 0o750)).To(BeNil())
+
+			Expect(vaultDirHasDir(vault, "24 Goals")).To(BeTrue())
+		})
+
+		It("reports a directory that does not exist", func() {
+			Expect(vaultDirHasDir(GinkgoT().TempDir(), "Goals")).To(BeFalse())
+		})
+
+		// A FILE is not a directory, so a `Goals` path that happens to be a file must not satisfy the
+		// check and send the goal rule looking inside it.
+		It("reports a path that is a file rather than a directory", func() {
+			vault := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(vault, "Goals"), []byte("x"), 0o600)).To(BeNil())
+
+			Expect(vaultDirHasDir(vault, "Goals")).To(BeFalse())
+		})
+
+		// A `~` is a spelling of the same directory, so the check must expand it rather than stat a
+		// literal `~` — which is not a path any vault lives at.
+		It("expands a leading ~ in the vault directory", func() {
+			// `.` under the home directory IS the home directory, which exists.
+			Expect(vaultDirHasDir("~", ".")).To(BeTrue())
 		})
 	})
 

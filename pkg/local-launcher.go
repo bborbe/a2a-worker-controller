@@ -73,13 +73,25 @@ const (
 	localConfirmInterval     = 100 * time.Millisecond
 	localConfirmRetries      = 2
 	localPaneScrollbackLines = 600
+	// localColorTimeout bounds the WHOLE colour step — the readiness poll plus the confirmation and
+	// its retries — because the attempt counts above bound each poll but not their sum.
+	//
+	// ⚠️ THE SUM IS WHAT MATTERS, AND IT IS PAID WHILE THE BACKEND'S MUTEX IS HELD. Readiness can
+	// poll for 8s and the confirmation for 1s per attempt across three attempts, so a slow-starting
+	// TUI could hold the lock for ~11s — with List and Stop blocked behind it — for a purely
+	// COSMETIC operation. Every iteration of both polls is a `wezterm cli get-text` SUBPROCESS, so
+	// the cost is real rather than theoretical. The confirmation normally lands well under a second,
+	// so this deadline is generous for the ordinary case and exists only to stop the pathological
+	// one from serializing the whole backend.
+	localColorTimeout = 5 * time.Second
 )
 
 // taskFrontmatter is the part of a task file's leading YAML block the local backend reads.
 //
 // ⚠️ IT IS PARSED AS YAML RATHER THAN LINE BY LINE, AND `goals:` IS WHY. The live vault carries
-// that field in BOTH shapes — a block list (`goals:` then `    - '[[Name]]'`, 2367 files) and an
-// inline flow list (`goals: ['[[Name]]']`, 420) — and a goal NAME itself contains commas
+// that field in THREE shapes, not two — a block list (`goals:` then `    - '[[Name]]'`, 2367
+// files), an inline flow list (`goals: ['[[Name]]']`, 420), and a bare scalar
+// (`goals: '[[Name]]'`, measured 2026-10-18 on two files) — and a goal NAME itself contains commas
 // ("Supervisor Routes Workers to local, docker or k8s Per Task"). A hand-rolled reader that split
 // the inline form on its commas would cut that name in two and then look up a goal that does not
 // exist, silently falling through to the vault launcher. frontmatterSessionID can read its field
@@ -176,9 +188,21 @@ func frontmatterText(values map[string]any, key string) string {
 }
 
 // frontmatterTexts returns a frontmatter list of strings, each trimmed and unwrapped. A key holding
-// anything but a list answers nothing, so a malformed value degrades to "no entries" rather than to
-// a bogus goal name.
+// anything but a list or a scalar answers nothing, so a malformed value degrades to "no entries"
+// rather than to a bogus goal name.
+//
+// ⚠️ A SCALAR IS ACCEPTED AS A ONE-ELEMENT LIST, BECAUSE THE LIVE VAULT CARRIES IT. Two task files
+// write `goals: '[[Restore Trading Profitability 2026Q2]]'` rather than a list — measured
+// 2026-10-18 — and requiring `[]any` dropped the goal entirely: the task then resolved as though it
+// named no goal and fell through to the vault launcher, which is the very silent drop this feature
+// exists to remove, reintroduced one layer down.
 func frontmatterTexts(values map[string]any, key string) []string {
+	if scalar, ok := values[key].(string); ok {
+		if trimmed := trimWikilink(scalar); trimmed != "" {
+			return []string{trimmed}
+		}
+		return nil
+	}
 	entries, ok := values[key].([]any)
 	if !ok {
 		return nil
@@ -233,6 +257,18 @@ type resolvedLauncher struct {
 // on one side what the other refuses would make the fleet's behaviour depend on which route opened
 // the worker — the exact divergence this change exists to remove.
 var safeLauncher = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// safeChip is the shape a role map's `chip` value must have before it is typed into a pane.
+//
+// ⚠️ IT IS A DIFFERENT GUARD FROM safeLauncher FOR A DIFFERENT REASON, AND THE REASON IS THE PANE
+// RATHER THAN A SHELL. The chip is not exec'd: it is typed into a live composer by
+// `wezterm cli send-text` and submitted with a trailing `\r`. A value carrying a newline would
+// therefore submit a line of its own — the rest of the chip arrives as a second, unintended message
+// — and one carrying `\r` would submit the `/color` line early, before the colour is complete. The
+// role map is operator config rather than worker-writable frontmatter, so this is a robustness guard
+// rather than a trust boundary, but it is the same rigour for the same class of harm: a value that
+// reaches a pane it was not meant to reach.
+var safeChip = regexp.MustCompile(`^[A-Za-z0-9 _-]+$`)
 
 // resolveTask resolves the two things a create reads out of the task's own file: the launcher its
 // tab will exec, and the role that decides the window and the chip colour.
@@ -297,6 +333,10 @@ func (b *localBackend) launcherFor(
 // create reply all name the same file. A frontmatter value can never carry a `~` — safeLauncher
 // refuses one — so this only ever matters for the vault launcher, which is operator config and may
 // legitimately be written the way a shell writes it.
+//
+// ⚠️ AND IT IS MADE ABSOLUTE HERE, WHICH IS A CORRECTNESS REQUIREMENT RATHER THAN TIDINESS. Every
+// branch below is passed through absoluteLauncher, because a relative value names one file to the
+// executability check and a different one to the tab's `exec` — see that function.
 func (b *localBackend) chooseLauncher(
 	ctx context.Context,
 	frontmatter taskFrontmatter,
@@ -306,7 +346,10 @@ func (b *localBackend) chooseLauncher(
 		if err != nil {
 			return resolvedLauncher{}, err
 		}
-		return resolvedLauncher{Path: expandHome(path), Source: launcherSourceTask}, nil
+		return resolvedLauncher{
+			Path:   b.absoluteLauncher(expandHome(path)),
+			Source: launcherSourceTask,
+		}, nil
 	}
 	fromGoals, err := b.goalLauncher(ctx, frontmatter.Goals)
 	if err != nil {
@@ -317,12 +360,37 @@ func (b *localBackend) chooseLauncher(
 		if err != nil {
 			return resolvedLauncher{}, err
 		}
-		return resolvedLauncher{Path: expandHome(path), Source: launcherSourceGoal}, nil
+		return resolvedLauncher{
+			Path:   b.absoluteLauncher(expandHome(path)),
+			Source: launcherSourceGoal,
+		}, nil
 	}
 	return resolvedLauncher{
-		Path:   expandHome(b.config.ClaudeScript),
+		Path:   b.absoluteLauncher(expandHome(b.config.ClaudeScript)),
 		Source: launcherSourceVault,
 	}, nil
+}
+
+// absoluteLauncher resolves a launcher path against the vault directory when it is not already
+// absolute, and returns an absolute one unchanged.
+//
+// ⚠️ IT EXISTS BECAUSE THE STAT AND THE EXEC RESOLVE A RELATIVE PATH AGAINST TWO DIFFERENT
+// DIRECTORIES, AND THE DIVERGENCE IS INVISIBLE UNTIL IT BITES. tabCommand builds
+// `cd <vaultDir> && exec <launcher>`, so the tab resolves a relative launcher against the VAULT
+// DIRECTORY, while requireExecutableLauncher resolves the very same string against the CONTROLLER
+// PROCESS's working directory. For a relative value — `./cc`, `sub/cc`, or a bare name left bare by
+// a bare configured ClaudeScript — the check therefore validates a file the exec never runs: it
+// refuses a launcher that is really there, or (the other direction) admits one that is not the file
+// the tab will run. Making the value absolute here is what makes the two agree BY CONSTRUCTION
+// rather than by luck of where the controller happened to be started.
+//
+// The vault directory is the right base because it is the directory the tab `cd`s into, so it is
+// the one the exec itself uses.
+func (b *localBackend) absoluteLauncher(path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(expandHome(b.config.VaultDir), path)
 }
 
 // goalLauncher returns the single launcher the task's goals name, or the empty string when none of
@@ -383,10 +451,18 @@ func (b *localBackend) goalLauncher(ctx context.Context, names []string) (string
 // readGoalLauncher returns the launcher the named goal records for itself, or the empty string when
 // it records none.
 //
-// ⚠️ THE GOAL NAME BECOMES A PATH COMPONENT, so it is validated as one, exactly as a task name is.
-// Frontmatter is writable by supervised workers, and a name carrying `..` or a separator would make
-// the controller read an arbitrary file and act on whatever `launcher:` it holds. A name that fails
-// this is an error rather than a skip, so the caller's warning names it.
+// ⚠️ THE GOAL NAME BECOMES A PATH, so it is validated as one, exactly as a task name is.
+// Frontmatter is writable by supervised workers, and a name carrying `..` or an absolute path would
+// make the controller read an arbitrary file and act on whatever `launcher:` it holds. A name that
+// fails this is an error rather than a skip, so the caller's warning names it.
+//
+// ⚠️ A `/` IS ALLOWED, BECAUSE A PATH-QUALIFIED WIKILINK IS A REAL VAULT SHAPE. 11 live tasks in
+// `25 Tasks` carry one — e.g. `goals: - "[[24 Goals/Build Security Review Agent]]"` and
+// `[[25 Tasks/Return to Live Trading]]`, measured 2026-10-18 — and refusing the separator made
+// goalLauncher warn and skip, so the worker opened on the vault default: the exact silent drop this
+// feature exists to remove. A name containing a separator is therefore resolved against the VAULT
+// ROOT (which is what a path-qualified link is relative to), while a bare name keeps resolving
+// against the goals directory, which is where a bare goal link lives.
 func readGoalLauncher(
 	ctx context.Context,
 	vaultDir string,
@@ -394,10 +470,21 @@ func readGoalLauncher(
 	name string,
 ) (string, error) {
 	trimmed := strings.TrimSpace(name)
-	if trimmed == "" || strings.ContainsAny(trimmed, `/\`) || strings.Contains(trimmed, "..") {
+	if trimmed == "" || strings.ContainsRune(trimmed, '\\') || filepath.IsAbs(trimmed) {
 		return "", errors.Errorf(ctx, "goal %q is not a valid goal name", name)
 	}
+	// ⚠️ THE `..` CHECK IS A SEPARATE LOOP BECAUSE THE NAME MAY NOW CONTAIN SEPARATORS. A `..`
+	// segment is what escapes the vault, and it is refused wherever it appears — `../x`,
+	// `24 Goals/../../x` — while a single `.` is an ordinary component.
+	for _, segment := range strings.Split(trimmed, "/") {
+		if segment == ".." {
+			return "", errors.Errorf(ctx, "goal %q is not a valid goal name", name)
+		}
+	}
 	path := filepath.Join(expandHome(vaultDir), goalsDir, trimmed+".md")
+	if strings.Contains(trimmed, "/") {
+		path = filepath.Join(expandHome(vaultDir), trimmed+".md")
+	}
 	//nolint:gosec // G304: the controller's own configured vault plus a validated goal name
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -424,6 +511,11 @@ func readGoalLauncher(
 // side by side — and a value containing `/` is used as given. The value is deliberately NOT checked
 // against a list of known launchers: a typo is caught by the executability check that follows, which
 // is an observable this backend has and the supervisor's response shape does not.
+//
+// ⚠️ WHAT IT RETURNS MAY STILL BE RELATIVE, AND THAT IS WHY chooseLauncher PASSES THE RESULT THROUGH
+// absoluteLauncher. `./cc` and `sub/cc` come back as written, and a bare name comes back bare when
+// the configured ClaudeScript is bare too; all three would otherwise be stat'ed against the
+// controller's own working directory and exec'd against the vault directory.
 func launcherPath(ctx context.Context, vaultLauncher string, value string) (string, error) {
 	trimmed := strings.TrimSpace(value)
 	if !safeLauncher.MatchString(trimmed) {
@@ -462,6 +554,12 @@ func launcherPath(ctx context.Context, vaultLauncher string, value string) (stri
 //
 // A directory is refused as well as a non-executable file: `exec` on a directory fails at the shell,
 // and a mode check alone would admit one whose permissions happen to carry an execute bit.
+//
+// ⚠️ THE PATH IT IS HANDED MUST ALREADY BE ABSOLUTE, AND THAT IS A PRECONDITION RATHER THAN A
+// STYLE PREFERENCE. os.Stat resolves a relative path against THIS PROCESS's working directory,
+// while the tab execs the same string after `cd <vaultDir>` — so a relative path here validates a
+// file the exec never runs. chooseLauncher is what guarantees the precondition, through
+// absoluteLauncher.
 func requireExecutableLauncher(ctx context.Context, path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -483,6 +581,16 @@ func requireExecutableLauncher(ctx context.Context, path string) error {
 // (server/task-launcher.mjs shells out to `vault-cli goal get`), so reading the same config is what
 // keeps the two spawn sites agreeing. The fallback is bounded for the same reason: being wrong there
 // costs the goal rule, never a refusal.
+//
+// ⚠️ AND A DIRECTORY THAT DOES NOT EXIST IS ITSELF A WRONG ANSWER, WHICH IS WHY IT IS CHECKED. The
+// configured value can be absent from a vault-cli entry entirely, and GetGoalsDir then answers its
+// own default of `Goals` — a directory a numbered-folder vault does not have. Returning it would be
+// indistinguishable from a correct answer that simply found no goal: the same silent drop again, and
+// this time with a warning that never fires. So the resolved directory is stat'ed, and a missing one
+// falls back to DefaultLocalGoalsDir when THAT exists. A directory that exists is used as resolved,
+// and one where neither candidate exists is still returned as resolved — with the warning the only
+// signal — because a spec or a partially-populated vault must not lose the goal rule to an absent
+// directory.
 func (b *localBackend) goalsDir(ctx context.Context) string {
 	dir, err := vaultGoalsDir(ctx, b.config.VaultDir)
 	if err != nil {
@@ -494,7 +602,37 @@ func (b *localBackend) goalsDir(ctx context.Context) string {
 		)
 		return DefaultLocalGoalsDir
 	}
+	if vaultDirHasDir(b.config.VaultDir, dir) {
+		return dir
+	}
+	if vaultDirHasDir(b.config.VaultDir, DefaultLocalGoalsDir) {
+		slog.Warn(
+			"the vault's configured goals directory does not exist; falling back to the default",
+			"vault", b.config.VaultDir,
+			"goals_dir", dir,
+			"fallback", DefaultLocalGoalsDir,
+		)
+		return DefaultLocalGoalsDir
+	}
+	slog.Warn(
+		"the vault's configured goals directory does not exist and neither does the default; "+
+			"the goal rule will find nothing",
+		"vault", b.config.VaultDir,
+		"goals_dir", dir,
+		"fallback", DefaultLocalGoalsDir,
+	)
 	return dir
+}
+
+// vaultDirHasDir reports whether the vault at vaultDir carries the subdirectory named dir.
+//
+// ⚠️ A STAT ERROR OTHER THAN ABSENCE ANSWERS FALSE, DELIBERATELY. This decides only which of two
+// candidate directories to look in, and a directory this process cannot stat is one the goal rule
+// could not read a file from either — so treating "cannot tell" as "not there" costs nothing and
+// keeps the check from needing a second error path. The caller logs either way.
+func vaultDirHasDir(vaultDir string, dir string) bool {
+	info, err := os.Stat(filepath.Join(expandHome(vaultDir), dir))
+	return err == nil && info.IsDir()
 }
 
 // vaultGoalsDir returns the goals directory vault-cli's own config records for the vault at
@@ -722,6 +860,14 @@ func readRoleMap(ctx context.Context, path string) (roleMap, error) {
 //
 // A role the map publishes no chip for (the map's own `Hold` entry is such a role) sends nothing at
 // all rather than a default: a wrong role signal is worse than a missing one.
+//
+// ⚠️ THE SEND IS BOUNDED BY localColorTimeout, AND THAT IS WHAT KEEPS A COSMETIC STEP FROM
+// SERIALIZING THE BACKEND. Create calls this while holding its mutex, so the caller's context alone
+// would bound it only by the request's own deadline — and the poll attempts inside the send can sum
+// to ~11s, all of it with List and Stop blocked. A deadline of its own turns the pathological case
+// into a logged, non-fatal timeout rather than a stall. The expiry is logged DISTINCTLY from a send
+// that failed, because the two mean different things: a timeout says the pane never proved the
+// colour landed, while a failure names a wezterm error.
 func (b *localBackend) applyRoleColor(
 	ctx context.Context,
 	guiID string,
@@ -731,13 +877,46 @@ func (b *localBackend) applyRoleColor(
 	if role.Chip == "" {
 		return
 	}
+	// ⚠️ THE CHIP IS SHAPE-CHECKED BEFORE IT IS TYPED, matching the rigour the `launcher:` value gets.
+	// It is typed into a live composer and submitted with a trailing `\r`, so a value carrying a
+	// newline would submit a line the caller never wrote — see safeChip. A value outside that shape
+	// is refused with a log rather than sanitized, because a chip the map did not mean to publish is
+	// not a colour anyone asked for.
+	if !safeChip.MatchString(role.Chip) {
+		slog.Warn(
+			"the role's chip colour is not a plain colour name; applying no colour",
+			"pane", paneID,
+			"role", role.Role,
+			"chip", role.Chip,
+		)
+		return
+	}
+	colorCtx, cancel := context.WithTimeout(ctx, localColorTimeout)
+	defer cancel()
 	if err := b.client.SendText(
-		ctx,
+		colorCtx,
 		guiID,
 		paneID,
 		localColorCommand+role.Chip,
 		localColorMarker,
 	); err != nil {
+		// ⚠️ THE DEADLINE IS READ FROM THE CONTEXT RATHER THAN MATCHED ON THE ERROR, so this does not
+		// depend on the send's own wrapping surviving a change: an expired colorCtx is the fact,
+		// whatever the returned error renders as.
+		if errors.Is(colorCtx.Err(), context.DeadlineExceeded) {
+			slog.Warn(
+				"applying the role's chip colour to the worker pane timed out; leaving it uncoloured",
+				"pane",
+				paneID,
+				"role",
+				role.Role,
+				"chip",
+				role.Chip,
+				"timeout",
+				localColorTimeout,
+			)
+			return
+		}
 		slog.Warn(
 			"apply the role's chip colour to the worker pane failed",
 			"pane", paneID,

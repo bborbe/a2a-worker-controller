@@ -1125,10 +1125,16 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	// worker still has its task — see applyRoleColor.
 	//
 	// ⚠️ IT BLOCKS WHILE THIS BACKEND'S MUTEX IS HELD, WHICH IS A DELIBERATE TRADE RATHER THAN AN
-	// OVERSIGHT. The send polls the pane, so a slow-starting TUI holds the lock for a few seconds and
-	// a concurrent list waits behind it — but the alternative is worse: releasing the lock first
-	// would let a stop kill the pane mid-send, and a create that returned before its colour landed
-	// would report an applied colour it never confirmed.
+	// OVERSIGHT. The send polls the pane, so a slow-starting TUI holds the lock while a concurrent
+	// list waits behind it — but the alternative is worse: releasing the lock first would let a stop
+	// kill the pane mid-send, and a create that returned before its colour landed would report an
+	// applied colour it never confirmed.
+	//
+	// ⚠️ THE BLOCK IS BOUNDED BY localColorTimeout, WHICH IS WHAT MAKES THE TRADE ACCEPTABLE. The
+	// poll attempts inside the send sum to ~11s at their own limits, so without a deadline of its own
+	// a cosmetic step could hold the lock that long and serialize every other call. The deadline
+	// expires into a logged, non-fatal timeout — see applyRoleColor — so the worst case is a few
+	// seconds and an uncoloured tab, never a stalled backend.
 	b.applyRoleColor(ctx, guiID, paneID, role)
 	return &CreateResponse{
 		Worker:         worker.worker(),
