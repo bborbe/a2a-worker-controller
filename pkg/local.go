@@ -945,10 +945,7 @@ func (b *localBackend) awaitLivePane(ctx context.Context, guiID string, paneID s
 	// the interval the loop would read once and never again, so a launcher dying mid-wait would
 	// be missed and the guard would silently degrade to "died before the first read". Deriving it
 	// keeps a short floor — a spec's, or a deployment's — as well covered as the default.
-	interval := floor / 10
-	if interval > localLivenessPollInterval {
-		interval = localLivenessPollInterval
-	}
+	interval := min(floor/10, localLivenessPollInterval)
 	if interval <= 0 {
 		interval = time.Millisecond
 	}
