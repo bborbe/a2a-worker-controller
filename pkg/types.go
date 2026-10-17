@@ -148,11 +148,29 @@ type CreateRequest struct {
 // CreateResponse is the reply to a create. It is the only place a worker's token is ever
 // returned: the controller keeps no copy it depends on, so a caller that loses this reply
 // stops the worker and creates another rather than asking the controller to repeat it.
+//
+// ⚠️ Launcher AND LauncherSource ARE A DELIBERATE WIDENING OF THIS SHARED SCHEMA, on the same
+// terms as Worker's PaneID and SessionID. What this file keeps out is a backend's IDENTITY — no
+// backend is named here, so a second backend does not have to edit the schema to become
+// selectable — and neither field is that: a launcher is how a worker was STARTED, which any
+// backend that runs a command can answer, and a caller that asked for a worker on a task's own
+// `launcher:` otherwise has no way to tell which script it got without opening a pane and reading
+// a process table. They are reported by create rather than on Worker because a launcher is a
+// create-time decision: nothing later re-resolves it, and a list of running workers answers a
+// different question.
 type CreateResponse struct {
 	Worker Worker `json:"worker"`
 	// Token is the worker's own bearer credential. It must never be logged, echoed into a
 	// transcript, or written to a file.
 	Token string `json:"token"`
+	// Launcher is the script the worker was started with. Empty for a backend that starts no
+	// command — a container or a pod runs an image, not a launcher.
+	Launcher string `json:"launcher"`
+	// LauncherSource names the rule that chose Launcher: `task` when the task's own `launcher:`
+	// frontmatter won, `goal` when exactly one of its goals named one, and `vault` when neither did
+	// and the vault's own claude_script was used. It is what makes a silently-ignored field
+	// visible from the reply, rather than only from a worker that came up on the wrong model.
+	LauncherSource string `json:"launcher_source"`
 }
 
 // ListResponse is the reply to a list.

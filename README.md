@@ -50,8 +50,9 @@ Optional, with defaults:
 | `-build-git-version` | `BUILD_GIT_VERSION` | `dev` | reported build version |
 | `-build-git-commit` | `BUILD_GIT_COMMIT` | `none` | reported build commit |
 | `-local-vault` | `LOCAL_VAULT` | — | **local backend, required**: vault root the workers' task files live in |
-| `-local-claude-script` | `LOCAL_CLAUDE_SCRIPT` | — | **local backend, required**: the vault's `claude_script` launcher every worker tab runs |
-| `-local-window-id` | `LOCAL_WINDOW_ID` | — | local backend: WezTerm window id every worker tab opens in; empty lands the tab in the window the spawning process is associated with |
+| `-local-claude-script` | `LOCAL_CLAUDE_SCRIPT` | — | **local backend, required**: the vault's `claude_script` launcher a worker tab runs when neither the task nor its goals names one |
+| `-local-window-id` | `LOCAL_WINDOW_ID` | — | local backend: WezTerm window id a worker tab opens in when its `role:` does not resolve one; empty lands the tab in the window the spawning process is associated with |
+| `-local-role-map` | `LOCAL_ROLE_MAP` | `~/.cache/wezterm-role-map.json` | local backend: WezTerm role map a task's `role:` is resolved against, for the window and the chip colour |
 | `-local-wezterm` | `LOCAL_WEZTERM` | the app bundle's binary | local backend: absolute path to the `wezterm` binary |
 | `-local-state-file` | `LOCAL_STATE_FILE` | `~/.local/state/a2a-worker-controller/local-workers.json` | local backend: the ownership store |
 
@@ -131,13 +132,22 @@ curl -s http://localhost:8080/a2a \
 
 | Operation | Request | Reply |
 |---|---|---|
-| `create` | `{"operation":"create","create":{"task":"<name>"}}` | `{"create":{"worker":{…},"token":"…"}}` — ⚠️ **FAILED** if the task already has a worker; see below |
+| `create` | `{"operation":"create","create":{"task":"<name>"}}` | `{"create":{"worker":{…},"token":"…","launcher":"…","launcher_source":"…"}}` — ⚠️ **FAILED** if the task already has a worker, or if its `launcher:` is not a plain executable path; see below |
 | `list` | `{"operation":"list"}` | `{"list":{"workers":[…]}}` |
 | `stop` | `{"operation":"stop","stop":{"worker_id":"…"}}` | `{"stop":{"worker":{…}}}` |
 
 The control reply is at `result.task.artifacts[0].parts[0].data`. A `worker` is
 `{worker_id, task, a2a_url, backend, state, pane_id, session_id}`; the `token` returned by
 `create` is that worker's **own** A2A bearer token and is returned by no other operation.
+
+⚠️ **`launcher` and `launcher_source` are on the `create` reply, and they report how the worker
+was STARTED.** They are the local backend's answer to a question a caller otherwise cannot ask:
+which script the worker came up on. `launcher` is that script's path, and `launcher_source` names
+the rule that chose it — `task` (the task's own `launcher:` frontmatter), `goal` (exactly one of
+its goals names one), or `vault` (neither did, so `-local-claude-script` was used). Both are
+**empty** for a `docker` or `k8s` worker, which runs an image rather than a launcher. They are
+reported by `create` rather than on the `worker` because a launcher is a create-time decision:
+nothing later re-resolves it.
 
 ⚠️ **`pane_id` and `session_id` exist for workers that have no URL.** A `local` worker is a
 WezTerm tab: it serves no A2A endpoint, so `a2a_url` is **empty**, the token `create` returns
@@ -173,6 +183,41 @@ forever while the worker it names is left running.
 **The schema is `pkg/types.go`** — the single definition of the API, shared by the Docker
 backend, the k3s sibling, the local backend, and the supervisor's `spawn_agent` target.
 Nothing above `pkg/backend-provider.go` may name a backend.
+
+## Local backend: which launcher, which window, which colour
+
+A local worker is a WezTerm tab, and three things about it are read from the task's own
+frontmatter rather than from the controller's configuration.
+
+**The launcher** follows the fleet's rule — task `launcher:` → else its goal's → else the vault's
+`claude_script` (`-local-claude-script`). A task naming its own launcher never reads its goals, a
+goal link that does not resolve is skipped with a logged warning, and two goals naming
+*different* launchers are **refused** rather than resolved by frontmatter order. A bare name
+resolves beside the vault's own launcher; a value containing `/` is used as given. The reply's
+`launcher_source` names the rule that won.
+
+⚠️ **The local backend is STRICTER than `spawn_agent` here, deliberately.** The supervisor's
+resolver validates the value's *shape* only, because a bad launcher there surfaces as an
+unreadable `model: null` on the spawn response. This backend has no such observable — `wezterm
+cli spawn` reports success for a tab whose `exec` then fails — so it additionally requires the
+resolved launcher to be **an executable file**, and refuses the create before any tab is opened.
+That covers the vault launcher too.
+
+⚠️ **The value comes from frontmatter, which supervised workers can write**, and it is exec'd
+inside `bash -lc`. Anything but a plain path — shell metacharacters, whitespace, a `..` segment —
+is therefore refused rather than quoted.
+
+**The window and the chip colour** come from the task's `role:` (`manager`, `agent` or `human`;
+absent means `agent`, and anything else is refused) resolved against the WezTerm role map
+(`-local-role-map`, default `~/.cache/wezterm-role-map.json`). The window is the role's, and the
+chip is applied by sending `/color <chip>` into the new pane and confirming it against the pane's
+own output — the send's exit code is not the confirmation. A role the map cannot resolve falls
+back to `-local-window-id` and applies no colour, and says so in a log; a colour that fails to
+apply is logged and does not fail the create, because the worker still has its task.
+
+⚠️ **The goals directory is read from vault-cli's own config** (`goals_dir`, matched by the
+vault's `path`), not hardcoded: `24 Goals` in the private-personal vault, `23 Goals` in others.
+When no entry names the vault, the goal rule falls back to `24 Goals` with a logged warning.
 
 ## Ownership
 

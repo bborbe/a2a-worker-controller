@@ -47,7 +47,8 @@ type application struct {
 	MountAllow        string `required:"false" arg:"mount-allow"           env:"MOUNT_ALLOW"           usage:"docker backend: comma-separated absolute host paths a caller may declare as mounts (empty allows none)"`
 	LocalVault        string `required:"false" arg:"local-vault"           env:"LOCAL_VAULT"           usage:"local backend: vault root the workers' task files live in"`
 	LocalClaudeScript string `required:"false" arg:"local-claude-script"   env:"LOCAL_CLAUDE_SCRIPT"   usage:"local backend: vault claude_script launcher every worker tab runs"`
-	LocalWindowID     string `required:"false" arg:"local-window-id"       env:"LOCAL_WINDOW_ID"       usage:"local backend: WezTerm window id every worker tab opens in (empty: the spawning process's own window)"`
+	LocalWindowID     string `required:"false" arg:"local-window-id"       env:"LOCAL_WINDOW_ID"       usage:"local backend: WezTerm window id a worker tab opens in when its role does not resolve one"`
+	LocalRoleMap      string `required:"false" arg:"local-role-map"        env:"LOCAL_ROLE_MAP"        usage:"local backend: WezTerm role map a task's role is resolved against"`
 	LocalWezterm      string `required:"false" arg:"local-wezterm"         env:"LOCAL_WEZTERM"         usage:"local backend: absolute path to the wezterm binary (defaults to the app bundle)"`
 	LocalStateFile    string `required:"false" arg:"local-state-file"      env:"LOCAL_STATE_FILE"      usage:"local backend: JSON file the worker ownership store lives in (defaults under ~/.local/state)"`
 	BuildGitVersion   string `required:"false" arg:"build-git-version"     env:"BUILD_GIT_VERSION"     usage:"Build Git version"                                                                                                       default:"dev"`
@@ -247,6 +248,7 @@ func (a *application) localBackend(
 			VaultDir:     a.LocalVault,
 			ClaudeScript: a.LocalClaudeScript,
 			WindowID:     a.LocalWindowID,
+			RoleMapPath:  a.LocalRoleMap,
 		},
 	), nil
 }

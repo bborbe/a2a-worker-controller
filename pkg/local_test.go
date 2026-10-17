@@ -23,14 +23,24 @@ import (
 // so a rename is a test failure rather than a test that follows the code.
 const (
 	testTasksDir      = "25 Tasks"
+	testGoalsDir      = "24 Goals"
 	testTabNamePrefix = "⚙ "
-	testClaudeScript  = "/Users/bborbe/Documents/workspaces/scripts/cc-private"
 	// testLivenessFloor is the floor the specs drive the backend with, far below the shipped
 	// DefaultLivenessFloor. Every healthy create pays the floor in full, so the default would add
 	// minutes across the suite; what these specs exercise is the mechanism, and the default's own
 	// value is asserted directly rather than by waiting it out.
 	testLivenessFloor = 40 * time.Millisecond
 )
+
+// testClaudeScript is the vault launcher a spec's backend is configured with.
+//
+// ⚠️ IT IS A PER-SPEC EXECUTABLE FILE UNDER A TEMPORARY DIRECTORY, NOT THE OPERATOR'S REAL
+// `cc-private`. A create now STATS the launcher it resolved and refuses a value that is not an
+// executable file, so a spec pointed at a real path would pass or fail according to what happens to
+// be installed on the machine running it — and the one spec that asserts a REFUSAL needs a path that
+// is reliably absent. The scripts live side by side, so the bare-name case resolves against this
+// file's own directory, exactly as it does against the real one.
+var testClaudeScript string
 
 // The GUI identities the specs drive the backend through.
 //
@@ -78,6 +88,25 @@ type killCall struct {
 	paneID string
 }
 
+// sendCall is one recorded send into a pane, with the marker the caller asked to confirm against.
+// The marker is recorded rather than assumed, because it is the whole difference between a send
+// that reports success and a send that was confirmed: a call site that dropped it would still pass
+// a spec that only asserted the text.
+type sendCall struct {
+	guiID  string
+	paneID string
+	text   string
+	marker string
+	// deadline is how much time the context the caller handed the send had left when it arrived, or
+	// zero when that context carried no deadline at all.
+	//
+	// ⚠️ IT IS RECORDED BECAUSE THE BOUND IS A PROPERTY OF THE CALL SITE AND IS INVISIBLE OTHERWISE.
+	// applyRoleColor wraps its send in a deadline of its own so a slow pane cannot hold the backend's
+	// mutex indefinitely, and a fake that ignored the context could not show it — the alternative
+	// would be a spec that waits the real timeout out, which the suite cannot afford.
+	deadline time.Duration
+}
+
 // fakeWeztermClient is the injected WeztermClient seam. It records every spawn and every kill
 // and answers with the panes it holds, so a spec drives the real backend through the real code
 // path without a GUI, a socket or a pane.
@@ -89,6 +118,7 @@ type fakeWeztermClient struct {
 	panes  []string
 	spawns []spawnCall
 	killed []killCall
+	sent   []sendCall
 	guiID  string
 	// guiErr makes the GUI identity unresolvable, which is how a spec reaches the branch a
 	// missing GUI takes before any pane is touched.
@@ -96,6 +126,9 @@ type fakeWeztermClient struct {
 	spawnErr error
 	paneErr  error
 	killErr  error
+	// sendErr makes the colour send fail, which is how a spec reaches the branch that must log it
+	// and still return a worker.
+	sendErr error
 	// paneErrAfterSpawn makes the pane listing fail only once a spawn has happened, which is how
 	// a spec reaches the guard's own error path: the pre-spawn reconcile has to succeed for the
 	// create to get that far, so paneErr alone would fail the wrong call.
@@ -171,6 +204,31 @@ func (f *fakeWeztermClient) GuiID(_ context.Context) (string, error) {
 	return f.guiID, nil
 }
 
+// SendText records the send, including the marker the caller asked to be confirmed against. The
+// real implementation blocks until the pane shows that marker; the fake records the request, so a
+// spec asserts what the backend ASKED FOR rather than re-testing the confirmation loop, which the
+// internal specs cover directly.
+func (f *fakeWeztermClient) SendText(
+	ctx context.Context,
+	guiID string,
+	paneID string,
+	text string,
+	marker string,
+) error {
+	var remaining time.Duration
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining = time.Until(deadline)
+	}
+	f.sent = append(f.sent, sendCall{
+		guiID:    guiID,
+		paneID:   paneID,
+		text:     text,
+		marker:   marker,
+		deadline: remaining,
+	})
+	return f.sendErr
+}
+
 func (f *fakeWeztermClient) KillPane(_ context.Context, guiID string, paneID string) error {
 	if f.killErr != nil {
 		f.killFailed = true
@@ -223,14 +281,21 @@ func taskFile(sessionID string) string {
 	return content + "---\n\nTags: [[Task]]\n"
 }
 
+// pageFile renders a vault page carrying exactly these frontmatter lines. It is how a spec declares
+// a `launcher:`, a `role:` or a `goals:` field without a second YAML writer in the suite.
+func pageFile(frontmatter ...string) string {
+	return "---\n" + strings.Join(frontmatter, "\n") + "\n---\n\nTags: [[Task]]\n"
+}
+
 var _ = Describe("LocalBackend", func() {
 	var (
-		ctx     context.Context
-		client  *fakeWeztermClient
-		store   pkg.WorkerStore
-		failing *fakeWorkerStore
-		vault   string
-		backend pkg.WorkerBackend
+		ctx         context.Context
+		client      *fakeWeztermClient
+		store       pkg.WorkerStore
+		failing     *fakeWorkerStore
+		vault       string
+		roleMapPath string
+		backend     pkg.WorkerBackend
 	)
 
 	const task = pkg.TaskName("local-backend-task")
@@ -242,8 +307,19 @@ var _ = Describe("LocalBackend", func() {
 		testGuiID = filepath.Join(guiDir, "gui-sock-"+strconv.Itoa(os.Getpid()))
 		testGuiIDAfterRestart = filepath.Join(guiDir, "gui-sock-2000")
 		testGuiIDDeadProcess = filepath.Join(guiDir, "gui-sock-"+deadPID)
+		// The vault launcher a spec's backend is configured with, created here so it is a real
+		// executable file the create can stat and a real directory a bare `launcher:` name can
+		// resolve beside. See testClaudeScript.
+		testClaudeScript = filepath.Join(GinkgoT().TempDir(), "cc-private")
+		Expect(os.WriteFile(testClaudeScript, []byte("#!/bin/sh\n"), 0o755)).To(BeNil())
 		client = &fakeWeztermClient{guiID: testGuiID}
 		store = pkg.NewJSONWorkerStore(filepath.Join(GinkgoT().TempDir(), "local-workers.json"))
+		// ⚠️ AN EMPTY ROLE MAP IS THE DEFAULT, AND IT IS WHAT KEEPS EVERY PRE-EXISTING SPEC
+		// MEANING WHAT IT MEANT. A role that does not resolve falls back to the configured window
+		// and applies no colour, which is the behaviour those specs were written against. A spec
+		// that wants a role to resolve writes its own map first.
+		roleMapPath = filepath.Join(GinkgoT().TempDir(), "wezterm-role-map.json")
+		Expect(os.WriteFile(roleMapPath, []byte("{}"), 0o600)).To(BeNil())
 		// The backend is handed the wrapper, so every spec exercises the same code path a
 		// failing store would take while the real store still holds the state it asserts on.
 		failing = &fakeWorkerStore{inner: store}
@@ -251,6 +327,7 @@ var _ = Describe("LocalBackend", func() {
 			VaultDir:      vault,
 			ClaudeScript:  testClaudeScript,
 			LivenessFloor: testLivenessFloor,
+			RoleMapPath:   roleMapPath,
 		})
 	})
 
@@ -264,6 +341,42 @@ var _ = Describe("LocalBackend", func() {
 			[]byte(taskFile(sessionID)),
 			0o600,
 		)).To(BeNil())
+	}
+
+	// writePage puts a task file carrying exactly these frontmatter lines in the vault.
+	writePage := func(name pkg.TaskName, frontmatter ...string) {
+		dir := filepath.Join(vault, testTasksDir)
+		Expect(os.MkdirAll(dir, 0o750)).To(BeNil())
+		Expect(os.WriteFile(
+			filepath.Join(dir, string(name)+".md"),
+			[]byte(pageFile(frontmatter...)),
+			0o600,
+		)).To(BeNil())
+	}
+
+	// writeGoal puts a goal file in the vault's goals directory, so a task's `goals:` link has
+	// something to resolve to.
+	writeGoal := func(name string, launcher string) {
+		dir := filepath.Join(vault, testGoalsDir)
+		Expect(os.MkdirAll(dir, 0o750)).To(BeNil())
+		frontmatter := []string{"page_type: goal"}
+		if launcher != "" {
+			frontmatter = append(frontmatter, "launcher: "+launcher)
+		}
+		Expect(os.WriteFile(
+			filepath.Join(dir, name+".md"),
+			[]byte(pageFile(frontmatter...)),
+			0o600,
+		)).To(BeNil())
+	}
+
+	// writeLauncher creates an executable file BESIDE THE VAULT LAUNCHER, which is where the cc-*
+	// scripts really live. That is what makes the two spellings of one launcher testable: the
+	// absolute path is what a `launcher:` may carry, and the bare name is what resolves there.
+	writeLauncher := func(name string) string {
+		path := filepath.Join(filepath.Dir(testClaudeScript), name)
+		Expect(os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755)).To(BeNil())
+		return path
 	}
 
 	Describe("Create", func() {
@@ -706,12 +819,17 @@ var _ = Describe("LocalBackend", func() {
 		// ⚠️ THE WINDOW IS PART OF THE SPAWN, SO IT IS ASSERTED RATHER THAN ASSUMED. Nothing
 		// else in the suite reads it: passing the empty string where the configured window
 		// belongs — or dropping the flag entirely — would otherwise pass every other spec.
+		//
+		// The role map is the empty one, so no role resolves and the CONFIGURED window is what the
+		// spawn carries. That is the fallback path rather than the ordinary one — see the Role
+		// resolution specs for the window a resolved role produces.
 		It("opens the tab in the configured window", func() {
 			windowed := pkg.NewLocalBackend(client, failing, pkg.LocalConfig{
 				VaultDir:      vault,
 				ClaudeScript:  testClaudeScript,
 				WindowID:      "7",
 				LivenessFloor: testLivenessFloor,
+				RoleMapPath:   roleMapPath,
 			})
 
 			_, err := windowed.Create(ctx, pkg.CreateRequest{Task: task})
@@ -780,6 +898,530 @@ var _ = Describe("LocalBackend", func() {
 				Expect(err.Error()).To(ContainSubstring("not a valid task name"))
 			}
 			Expect(client.spawns).To(BeEmpty())
+		})
+	})
+
+	// ⚠️ THE LAUNCHER PRECEDENCE IS task → goal → vault `claude_script`, AND IT IS THE FLEET'S OWN
+	// RULE (claude-supervisor `docs/fleet-surface.md` § Spawn a worker, item 8) RATHER THAN ONE THIS
+	// BACKEND INVENTED. `spawn_agent` honours it; this backend used to exec the vault default for
+	// every tab, so `/supervisor:open` — whose create branch routes an absent `target:` here —
+	// silently opened a task on the wrong script.
+	Describe("Launcher resolution", func() {
+		It("runs the vault launcher when neither the task nor a goal names one", func() {
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(testClaudeScript))
+			Expect(response.LauncherSource).To(Equal("vault"))
+			Expect(client.spawns[0].inner).To(ContainSubstring("exec '" + testClaudeScript + "'"))
+		})
+
+		It("runs the launcher the task names, and reports task as the source", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writePage(task, "launcher: "+launcher)
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("task"))
+			Expect(client.spawns[0].inner).To(ContainSubstring("exec '" + launcher + "'"))
+		})
+
+		// The bare-name rule: the cc-* scripts live side by side, so a name resolves beside the
+		// vault's own launcher rather than on PATH.
+		It("resolves a bare launcher name beside the vault launcher", func() {
+			writeLauncher("cc-private-claude")
+			writePage(task, "launcher: cc-private-claude")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(
+				filepath.Join(filepath.Dir(testClaudeScript), "cc-private-claude"),
+			))
+			Expect(response.LauncherSource).To(Equal("task"))
+		})
+
+		// ⚠️ THE STAT AND THE EXEC MUST NAME THE SAME FILE, AND THIS SPEC IS WHAT PINS IT. tabCommand
+		// builds `cd <vaultDir> && exec <launcher>`, so the TAB resolves a relative launcher against
+		// the VAULT directory, while the executability check resolves the same string against the
+		// CONTROLLER PROCESS's working directory. A launcher written relative to the vault — which is
+		// exactly what a path-qualified value is — was therefore stat'ed at a path the exec never ran:
+		// refused for a file the exec would have found, or, the other way round, admitted for one it
+		// would not. The launcher here exists ONLY under the vault, so without the fix the check fails
+		// with "is not an executable file" while the tab command would have worked.
+		It(
+			"resolves a relative launcher against the vault directory, where the tab execs it",
+			func() {
+				Expect(os.WriteFile(
+					filepath.Join(vault, "cc-relative"),
+					[]byte("#!/bin/sh\n"),
+					0o755,
+				)).To(BeNil())
+				writePage(task, "launcher: ./cc-relative")
+
+				response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+				Expect(err).To(BeNil())
+				Expect(response.Launcher).To(Equal(filepath.Join(vault, "cc-relative")))
+				Expect(response.LauncherSource).To(Equal("task"))
+				// The tab execs the same absolute path the check stat'ed, so the two cannot drift apart.
+				Expect(client.spawns[0].inner).To(ContainSubstring(
+					"exec '" + filepath.Join(vault, "cc-relative") + "'",
+				))
+			},
+		)
+
+		It("runs the launcher a goal names when the task names none", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writeGoal("A Goal With A Launcher", launcher)
+			writePage(task, "goals:", "    - '[[A Goal With A Launcher]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("goal"))
+			Expect(client.spawns[0].inner).To(ContainSubstring("exec '" + launcher + "'"))
+		})
+
+		// ⚠️ A PATH-QUALIFIED GOAL LINK IS A REAL VAULT SHAPE, NOT A TYPO: 11 live tasks in `25 Tasks`
+		// carry one — `goals: - "[[24 Goals/Build Security Review Agent]]"` and
+		// `[[25 Tasks/Return to Live Trading]]` among them, measured 2026-10-18. It resolves against
+		// the VAULT ROOT, so a rule that refused the separator made the goal rule skip and the worker
+		// open on the vault default: the exact silent drop this feature exists to remove.
+		It("resolves a path-qualified goal link against the vault root", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writeGoal("A Goal With A Launcher", launcher)
+			writePage(task, "goals:", "    - '[[24 Goals/A Goal With A Launcher]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("goal"))
+		})
+
+		// The other live shape points into `25 Tasks`, and it resolves by the same rule: the path is
+		// relative to the vault root, whichever numbered folder it names.
+		It("resolves a path-qualified goal link that points into the tasks directory", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writePage(pkg.TaskName("Return to Live Trading"), "launcher: "+launcher)
+			writePage(task, "goals:", "    - '[[25 Tasks/Return to Live Trading]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("goal"))
+		})
+
+		// The inline flow form is what 420 files in the live vault carry, and a goal name can
+		// contain a comma — so this is the case a split-on-comma reader would get wrong.
+		It("reads an inline goals list whose entry contains a comma", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writeGoal("Supervisor Routes Workers to local, docker or k8s", launcher)
+			writePage(task, "goals: ['[[Supervisor Routes Workers to local, docker or k8s]]']")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("goal"))
+		})
+
+		// ⚠️ THE SCALAR SHAPE IS IN THE LIVE VAULT TOO — `goals: '[[Restore Trading Profitability
+		// 2026Q2]]'`, two files measured 2026-10-18 — and a reader that required a LIST dropped the
+		// goal entirely, falling through to the vault launcher for a task that did name one.
+		It("reads a scalar goals value as a one-entry list", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writeGoal("A Goal With A Launcher", launcher)
+			writePage(task, "goals: '[[A Goal With A Launcher]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("goal"))
+		})
+
+		// ⚠️ A TASK NAMING ITS OWN LAUNCHER NEVER READS ITS GOALS, so a goal that cannot be
+		// resolved cannot refuse a spawn the precedence says should open.
+		//
+		// ⚠️ THE GOALS HERE NAME TWO DIFFERENT LAUNCHERS, AND THAT IS WHAT MAKES THE SPEC
+		// DISCRIMINATING. Naming one that merely does not exist proves nothing: a reader that read
+		// the goals first would skip the missing file and still answer with the task's own launcher,
+		// so the spec passed either way. Two goals naming different launchers is the input a
+		// read-the-goals-first path REFUSES — "different launchers" — so only a code path that
+		// honours the task's own launcher without consulting them can succeed here.
+		It("does not read the goals when the task names its own launcher", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writeGoal("Goal A", writeLauncher("cc-a"))
+			writeGoal("Goal B", writeLauncher("cc-b"))
+			writePage(
+				task,
+				"launcher: "+launcher,
+				"goals:",
+				"    - '[[Goal A]]'",
+				"    - '[[Goal B]]'",
+			)
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("task"))
+		})
+
+		// A stale goal link is a normal vault state, and refusing on one would stop every task
+		// carrying it from opening at all.
+		It(
+			"skips a goal link that does not resolve and falls through to the vault launcher",
+			func() {
+				writePage(task, "goals:", "    - '[[A Goal That Does Not Exist]]'")
+
+				response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+				Expect(err).To(BeNil())
+				Expect(response.Launcher).To(Equal(testClaudeScript))
+				Expect(response.LauncherSource).To(Equal("vault"))
+			},
+		)
+
+		// ⚠️ REFUSED, NOT RESOLVED BY FRONTMATTER ORDER. List order is not a precedence anyone
+		// chose, so picking the first would be a silent guess.
+		It("refuses two goals naming different launchers", func() {
+			first := writeLauncher("cc-a")
+			second := writeLauncher("cc-b")
+			writeGoal("Goal A", first)
+			writeGoal("Goal B", second)
+			writePage(task, "goals:", "    - '[[Goal A]]'", "    - '[[Goal B]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("different launchers"))
+			Expect(response).To(BeNil())
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		// Two goals naming the SAME launcher is one launcher, not a conflict.
+		It("accepts two goals naming the same launcher", func() {
+			launcher := writeLauncher("cc-private-claude")
+			writeGoal("Goal A", launcher)
+			writeGoal("Goal B", launcher)
+			writePage(task, "goals:", "    - '[[Goal A]]'", "    - '[[Goal B]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(launcher))
+			Expect(response.LauncherSource).To(Equal("goal"))
+		})
+
+		// ⚠️ THE SHAPE GUARD IS A TRUST BOUNDARY: the value comes from frontmatter, which
+		// supervised workers can write, and it is exec'd inside `bash -lc`.
+		It("refuses a launcher carrying shell syntax", func() {
+			for _, value := range []string{
+				"cc-private; rm -rf /",
+				"cc-private && curl evil",
+				"$(whoami)",
+				"cc private",
+			} {
+				writePage(task, "launcher: "+value)
+
+				response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+				Expect(err).NotTo(BeNil())
+				Expect(err.Error()).To(ContainSubstring("not a plain script name or path"))
+				Expect(response).To(BeNil())
+			}
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		// ⚠️ THE GUARD APPLIES TO A GOAL'S LAUNCHER TOO, AND A GOAL IS THE EASIER PLACE TO MISS IT.
+		// The value is read out of a DIFFERENT file from the one the caller named, so it is the
+		// default route for any task that declares no launcher of its own — and goalLauncher
+		// shape-checks each value BEFORE counting, so an unsafe one is refused for what it IS rather
+		// than losing a count comparison to a sibling goal.
+		It("refuses a goal whose launcher carries shell syntax", func() {
+			writeGoal("A Goal With An Unsafe Launcher", "cc-private; rm -rf /")
+			writePage(task, "goals:", "    - '[[A Goal With An Unsafe Launcher]]'")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("not a plain script name or path"))
+			Expect(response).To(BeNil())
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		It("refuses a launcher carrying a parent path segment", func() {
+			writePage(task, "launcher: ../../bin/sh")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("path segment"))
+			Expect(response).To(BeNil())
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		// ⚠️ SC2, AND THE REFUSAL HAPPENS BEFORE ANY TAB IS OPENED. `wezterm cli spawn` reports
+		// success for a tab whose `exec` then fails, so without this check a typo produces a
+		// recorded worker whose pane is already gone — a create that reads as successful and a
+		// worker that does not exist.
+		It("refuses a launcher that is not an executable file, opening no tab", func() {
+			writePage(task, "launcher: cc-private-claud")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("is not an executable file"))
+			Expect(response).To(BeNil())
+			Expect(client.spawns).To(BeEmpty())
+			workers, listErr := store.List(ctx)
+			Expect(listErr).To(BeNil())
+			Expect(workers).To(BeEmpty())
+		})
+
+		It("refuses a launcher that is a directory", func() {
+			writePage(task, "launcher: "+GinkgoT().TempDir())
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("is not an executable file"))
+			Expect(response).To(BeNil())
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		It("refuses a launcher that exists but is not executable", func() {
+			path := filepath.Join(GinkgoT().TempDir(), "cc-not-executable")
+			Expect(os.WriteFile(path, []byte("#!/bin/sh\n"), 0o644)).To(BeNil())
+			writePage(task, "launcher: "+path)
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("is not an executable file"))
+			Expect(response).To(BeNil())
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		// ⚠️ AN UNREADABLE TASK FILE DEGRADES TO THE VAULT LAUNCHER RATHER THAN REFUSING, which is
+		// the behaviour that existed before the field was honoured and the same treatment the
+		// session-id read already gives it. A task file is not required for a tab to open.
+		It("falls back to the vault launcher when the task file cannot be read", func() {
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: "no-such-task"})
+
+			Expect(err).To(BeNil())
+			Expect(response.Launcher).To(Equal(testClaudeScript))
+			Expect(response.LauncherSource).To(Equal("vault"))
+		})
+	})
+
+	// ⚠️ THE ROLE DECIDES THE WINDOW AND THE CHIP, AND BOTH ARE PER-CREATE. A single configured
+	// window cannot serve three roles: measured 2026-10-17, two creates fifteen minutes apart landed
+	// in windows 2 and 0, both for `role: agent` rows, so placement was luck.
+	Describe("Role resolution", func() {
+		writeAgentMap := func() {
+			Expect(os.WriteFile(roleMapPath, []byte(`{
+				"Managers": {"chip": "orange", "window_id": 0},
+				"Direct": {"chip": "cyan", "window_id": 1},
+				"Agents": {"chip": "pink", "window_id": 2}
+			}`), 0o600)).To(BeNil())
+		}
+
+		It("opens the tab in the role's window and applies the role's chip", func() {
+			writeAgentMap()
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(client.spawns[0].windowID).To(Equal("2"))
+			Expect(client.sent).To(HaveLen(1))
+			Expect(client.sent[0].text).To(Equal("/color pink"))
+			// ⚠️ THE MARKER IS WHAT MAKES THE SEND A CONFIRMED ONE. A call site that dropped it
+			// would report a colour as applied on the strength of an exit code that says only that
+			// keystrokes reached the pty.
+			Expect(client.sent[0].marker).To(Equal("Session color set to"))
+			Expect(client.sent[0].paneID).To(Equal("pane-1001"))
+			Expect(client.sent[0].guiID).To(Equal(testGuiID))
+		})
+
+		It("opens a manager's tab in the Managers window with the Managers chip", func() {
+			writeAgentMap()
+			writePage(task, "role: manager")
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(client.spawns[0].windowID).To(Equal("0"))
+			Expect(client.sent[0].text).To(Equal("/color orange"))
+		})
+
+		// The map's own vocabulary is not the task's: a window named "Direct" serves "human".
+		It("opens a human's tab in the Direct window with the Direct chip", func() {
+			writeAgentMap()
+			writePage(task, "role: human")
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(client.spawns[0].windowID).To(Equal("1"))
+			Expect(client.sent[0].text).To(Equal("/color cyan"))
+		})
+
+		// ⚠️ AN ABSENT ROLE IS `agent`, which is what keeps every task that has never declared one
+		// on the behaviour it had before.
+		It("treats a task with no role as agent", func() {
+			writeAgentMap()
+			writePage(task, "status: in_progress")
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(client.spawns[0].windowID).To(Equal("2"))
+			Expect(client.sent[0].text).To(Equal("/color pink"))
+		})
+
+		// ⚠️ AN UNKNOWN ROLE IS REFUSED RATHER THAN DEFAULTED: a worker opened in the wrong window
+		// with the wrong colour is discovered only by noticing it.
+		It("refuses a role that is not one of the three", func() {
+			writeAgentMap()
+			writePage(task, "role: worker")
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("is not a role"))
+			Expect(response).To(BeNil())
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		// ⚠️ AN UNUSABLE MAP IS DEGRADED, NOT REFUSED — and the fallback is the CONFIGURED window,
+		// not "no preference". Reading an unresolved role as no preference is what lands a tab in
+		// whatever window the spawning process happens to be associated with.
+		It("falls back to the configured window when the role map is missing", func() {
+			Expect(os.Remove(roleMapPath)).To(BeNil())
+			// ⚠️ testLivenessFloor IS CONFIGURED HERE LIKE EVERY OTHER SPEC. Leaving it out does not
+			// fail — it silently pays the shipped 1500ms default, so this one spec costs the suite
+			// more than the rest of the file combined.
+			windowed := pkg.NewLocalBackend(client, failing, pkg.LocalConfig{
+				VaultDir:      vault,
+				ClaudeScript:  testClaudeScript,
+				WindowID:      "7",
+				LivenessFloor: testLivenessFloor,
+				RoleMapPath:   roleMapPath,
+			})
+
+			response, err := windowed.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.LauncherSource).To(Equal("vault"))
+			Expect(client.spawns[0].windowID).To(Equal("7"))
+			// No colour is sent at all: a wrong role signal is worse than a missing one.
+			Expect(client.sent).To(BeEmpty())
+		})
+
+		It("falls back when the role map is not valid json", func() {
+			Expect(os.WriteFile(roleMapPath, []byte("not json"), 0o600)).To(BeNil())
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(client.spawns[0].windowID).To(BeEmpty())
+			Expect(client.sent).To(BeEmpty())
+		})
+
+		// A map entry that publishes no window is not an answer: reading a missing `window_id` as
+		// window 0 would land the worker in the Managers window.
+		It("falls back when the role's entry carries no window id", func() {
+			Expect(
+				os.WriteFile(roleMapPath, []byte(`{"Agents": {"chip": "pink"}}`), 0o600),
+			).To(BeNil())
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(client.spawns[0].windowID).To(BeEmpty())
+			Expect(client.sent).To(BeEmpty())
+		})
+
+		// A null chip is a real answer — the live map's `Hold` entry carries one — and it means
+		// send nothing rather than send a default.
+		It("applies no colour when the role's entry publishes a null chip", func() {
+			Expect(os.WriteFile(roleMapPath, []byte(
+				`{"Agents": {"chip": null, "window_id": 2}}`,
+			), 0o600)).To(BeNil())
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(client.spawns[0].windowID).To(Equal("2"))
+			Expect(client.sent).To(BeEmpty())
+		})
+
+		// ⚠️ THE CHIP IS TYPED INTO A LIVE PANE, SO A VALUE THAT IS NOT A PLAIN COLOUR NAME IS
+		// REFUSED RATHER THAN SENT. The send appends a trailing `\r`, so a chip carrying a newline
+		// would submit a second line the caller never wrote. The worker is still recorded — the
+		// colour is cosmetic — but nothing is typed.
+		It("sends no colour when the role map's chip is not a plain colour name", func() {
+			Expect(os.WriteFile(roleMapPath, []byte(
+				`{"Agents": {"chip": "pink\nrm -rf /", "window_id": 2}}`,
+			), 0o600)).To(BeNil())
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Worker.PaneID).To(Equal("pane-1001"))
+			Expect(client.sent).To(BeEmpty())
+		})
+
+		// ⚠️ THE COLOUR STEP IS BOUNDED, AND THIS IS WHERE THE BOUND IS VISIBLE WITHOUT WAITING IT OUT.
+		// Create applies the colour while holding the backend's mutex, and the send's own polls can
+		// sum to ~11s, so a cosmetic step could otherwise serialize every other call. The fake records
+		// the deadline the caller handed it; a call site that dropped the deadline would record zero.
+		It("bounds the colour send with a deadline of its own", func() {
+			writeAgentMap()
+
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(client.sent).To(HaveLen(1))
+			Expect(client.sent[0].deadline).To(BeNumerically(">", 0))
+			Expect(client.sent[0].deadline).To(BeNumerically("<=", 10*time.Second))
+		})
+
+		// ⚠️ A COLOUR THAT FAILS TO APPLY IS LOGGED AND NON-FATAL: the worker still has its task,
+		// so failing the create over a cosmetic difference would orphan a live pane the caller was
+		// never told about.
+		It("still records the worker when the colour cannot be applied", func() {
+			writeAgentMap()
+			client.sendErr = errWezterm
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).To(BeNil())
+			Expect(response.Worker.PaneID).To(Equal("pane-1001"))
+			workers, listErr := store.List(ctx)
+			Expect(listErr).To(BeNil())
+			Expect(workers).To(HaveLen(1))
+		})
+
+		// The colour is applied after the store write, which is what makes the pane stoppable. A
+		// failed write must therefore leave no colour behind on a pane that is about to be killed.
+		It("sends no colour when the worker cannot be recorded", func() {
+			writeAgentMap()
+			failing.saveErr = errStore
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(response).To(BeNil())
+			Expect(client.sent).To(BeEmpty())
 		})
 	})
 
