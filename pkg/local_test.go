@@ -96,6 +96,10 @@ type fakeWeztermClient struct {
 	// the panes finds nothing.
 	killFailed           bool
 	panesAfterFailedKill []string
+	// onSpawn runs inside Spawn, before it answers. It is how a spec models what really happens
+	// on the other side of a spawn: the tab's session starts and writes its binding into the
+	// task file, which is the event a baseline read placed after the spawn would swallow.
+	onSpawn func()
 }
 
 // Spawn records the GUI it was asked for as well as the window and command line, so a spec can
@@ -107,6 +111,9 @@ func (f *fakeWeztermClient) Spawn(
 	inner string,
 ) (string, error) {
 	f.spawns = append(f.spawns, spawnCall{guiID: guiID, windowID: windowID, inner: inner})
+	if f.onSpawn != nil {
+		f.onSpawn()
+	}
 	if f.spawnErr != nil {
 		return "", f.spawnErr
 	}
@@ -418,6 +425,33 @@ var _ = Describe("LocalBackend", func() {
 				Expect(err).To(BeNil())
 				Expect(response.Worker.SessionID).To(BeEmpty())
 				Expect(response.Worker.PaneID).NotTo(BeEmpty())
+			},
+		)
+
+		// ⚠️ THE BASELINE IS READ BEFORE THE TAB IS OPENED, AND THIS IS WHAT PINS IT. The fake's
+		// spawn writes the worker's own session id into the task file — which is what really
+		// happens, a moment later — so a baseline read AFTER the spawn would swallow it: the value
+		// would equal the baseline, and refreshSessionIDs never accepts a value equal to the
+		// baseline, so the worker's own id would be the one id it never reports. Read before, the
+		// id differs from the baseline and is reported normally.
+		It(
+			"reads the baseline before the tab exists, so the worker's own id is not swallowed",
+			func() {
+				client.onSpawn = func() { writeTask(task, "session-of-this-worker") }
+
+				_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+				Expect(err).To(BeNil())
+				workers, listErr := store.List(ctx)
+				Expect(listErr).To(BeNil())
+				Expect(workers).To(HaveLen(1))
+				Expect(workers[0].CreateSessionID).To(BeEmpty())
+				Expect(workers[0].SessionID).To(BeEmpty())
+
+				response, err := backend.List(ctx)
+
+				Expect(err).To(BeNil())
+				Expect(response.Workers).To(HaveLen(1))
+				Expect(response.Workers[0].SessionID).To(Equal("session-of-this-worker"))
 			},
 		)
 
@@ -737,30 +771,62 @@ var _ = Describe("LocalBackend", func() {
 			Expect(workers).To(BeEmpty())
 		})
 
-		// ⚠️ A SECOND, STILL-RUNNING GUI MUST NOT COST THE FIRST ONE ITS RECORDS. With a second
-		// GUI live the resolved identity flips, and under the old rule every stored worker was
-		// judged dead on that basis alone and erased — irreversibly, while its tab kept running
-		// and no stop could reach it any more. Both halves of "that GUI is still running" hold
-		// here — its socket is on disk and the pid in its name is alive — so the entry is kept;
-		// the call cannot see that GUI's panes, so the entry is not reported either.
-		It(
-			"keeps, without reporting, a worker whose GUI is still running beside the current one",
-			func() {
-				created, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
-				Expect(err).To(BeNil())
-				Expect(os.WriteFile(testGuiID, nil, 0o600)).To(BeNil())
-				client.guiID = testGuiIDAfterRestart
+		// ⚠️ A SECOND, STILL-RUNNING GUI MUST NOT COST THE FIRST ONE ITS RECORDS — NOR ITS
+		// WORKER'S ID. With a second GUI live the resolved identity flips, and under the old rule
+		// every stored worker was judged dead on that basis alone and erased, irreversibly, while
+		// its tab kept running. Both halves of "that GUI is still running" hold here — its socket
+		// is on disk and the pid in its name is alive — so the entry is kept.
+		//
+		// ⚠️ AND IT IS REPORTED. Withholding it looked like the careful answer and was the
+		// harmful one: the entry stays in the store, so create still refuses that task, while the
+		// id that would clear it appears in no reply and a backend failure reaches a caller with
+		// no detail — a dead end until the other GUI exits. Reporting it makes the id obtainable,
+		// and stop closes such a worker through its own socket, so it is actionable too.
+		It("keeps and reports a worker whose GUI is still running beside the current one", func() {
+			created, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+			Expect(err).To(BeNil())
+			Expect(os.WriteFile(testGuiID, nil, 0o600)).To(BeNil())
+			client.guiID = testGuiIDAfterRestart
 
-				response, err := backend.List(ctx)
+			response, err := backend.List(ctx)
 
-				Expect(err).To(BeNil())
-				Expect(response.Workers).To(BeEmpty())
-				workers, listErr := store.List(ctx)
-				Expect(listErr).To(BeNil())
-				Expect(workers).To(HaveLen(1))
-				Expect(workers[0].WorkerID).To(Equal(created.Worker.WorkerID))
-			},
-		)
+			Expect(err).To(BeNil())
+			Expect(response.Workers).To(HaveLen(1))
+			Expect(response.Workers[0].WorkerID).To(Equal(created.Worker.WorkerID))
+			Expect(response.Workers[0].PaneID).To(Equal(created.Worker.PaneID))
+			workers, listErr := store.List(ctx)
+			Expect(listErr).To(BeNil())
+			Expect(workers).To(HaveLen(1))
+			Expect(workers[0].WorkerID).To(Equal(created.Worker.WorkerID))
+		})
+
+		// The recovery the reporting above exists to make possible: the id from list is the one
+		// stop takes, and the pane it names is closed through the other GUI's own socket.
+		It("stops the worker of another live GUI using the id that list reported", func() {
+			created, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+			Expect(err).To(BeNil())
+			Expect(os.WriteFile(testGuiID, nil, 0o600)).To(BeNil())
+			client.guiID = testGuiIDAfterRestart
+
+			listed, err := backend.List(ctx)
+			Expect(err).To(BeNil())
+			Expect(listed.Workers).To(HaveLen(1))
+
+			response, err := backend.Stop(
+				ctx,
+				pkg.StopRequest{WorkerID: listed.Workers[0].WorkerID},
+			)
+
+			Expect(err).To(BeNil())
+			Expect(response.Worker.State).To(Equal(pkg.WorkerStateStopped))
+			Expect(client.killed).To(Equal([]killCall{{
+				guiID:  testGuiID,
+				paneID: created.Worker.PaneID,
+			}}))
+			workers, listErr := store.List(ctx)
+			Expect(listErr).To(BeNil())
+			Expect(workers).To(BeEmpty())
+		})
 
 		// ⚠️ THE OTHER HALF OF THAT RULE, AND THE ONE THAT STOPS A STALE SOCKET WEDGING A TASK.
 		// A GUI that dies UNCLEANLY leaves its socket on disk, so existence alone would keep its
@@ -1123,5 +1189,6 @@ var _ = Describe("LocalBackend", func() {
 			Expect(workers[0].SessionID).To(Equal("session-of-this-worker"))
 			Expect(workers[0].CreateSessionID).To(Equal("session-of-an-earlier-worker"))
 		})
+
 	})
 })

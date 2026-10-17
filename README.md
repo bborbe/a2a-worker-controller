@@ -181,13 +181,15 @@ the `local` backend lives in a JSON store (`-local-state-file`) holding each wor
 `worker_id`, `task`, `pane_id`, the WezTerm GUI instance the pane belongs to, and its session
 id. The store is the record and the live panes are the truth: every `create`, `list` and `stop`
 reconciles the two, so a pane killed by hand stops being a worker without anything having to be
-told. An entry belonging to a GUI that is not the current one is **kept** — a second,
-still-running WezTerm must not cost the first one its records — and left out of `list`'s reply,
-since this controller cannot see that GUI's panes. It is erased only once that GUI is provably
-gone, which is its socket being off disk **or** the pid in its name being dead, so a GUI that
-died uncleanly cannot leave a record behind that blocks `create` for its task. `stop` on such a
-worker closes its pane through **that** GUI's own socket rather than untracking it. The state
-file is single-writer: `save` replaces it wholesale, so one file belongs to exactly one
+told. An entry belonging to a GUI that is not the current one is **kept and reported** — a
+second, still-running WezTerm must not cost the first one its records, and withholding the id
+would leave the task it serves refused by `create` and reachable by no `stop`. It is erased only
+once that GUI is provably gone, which is its socket being off disk **or** the pid in its name
+being dead, so a GUI that died uncleanly cannot leave a record behind that blocks `create` for
+its task. `stop` on such a worker closes its pane through **that** GUI's own socket rather than
+untracking it. ⚠️ A local worker's `pane_id` is meaningful only within the GUI the controller is
+running against, so address a worker by its `worker_id` and let the controller resolve the pane.
+The state file is single-writer: `save` replaces it wholesale, so one file belongs to exactly one
 controller.
 
 ## Development

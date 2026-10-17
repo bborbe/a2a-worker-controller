@@ -179,6 +179,16 @@ func NewJSONWorkerStore(path string) WorkerStore {
 
 // List reads the store. A store that does not exist yet is an empty store rather than an
 // error: the first create on a fresh machine has no file to read.
+//
+// ⚠️ NO LOAD-TIME RULE REPAIRS AN ENTRY WHOSE BASELINE IS EMPTY, AND THIS IS WHERE ONE WOULD
+// HAVE TO GO. Such an entry cannot be told apart from an ordinary one: a worker created for a
+// task that had not bound a session yet ALSO carries an empty baseline — the task file
+// legitimately held nothing when that worker started — and its id arrives afterwards and must be
+// reported, so treating an empty baseline as unverifiable would suppress the id of every
+// ordinary worker. Clearing the stored id does not repair the entry either: the value is still
+// in the task file, and refreshSessionIDs re-reads it and re-derives the very same answer on the
+// next list. The only entries this could ever matter for are ones written before the baseline
+// existed, and the feature is unreleased, so the store holds none.
 func (s *jsonWorkerStore) List(ctx context.Context) ([]LocalWorker, error) {
 	//nolint:gosec // G304: the path is the controller's own configured state file, not input
 	content, err := os.ReadFile(s.path)
@@ -549,6 +559,20 @@ func processAlive(pidText string) bool {
 //
 // A GUI genuinely running alongside the current one satisfies both halves, so its records
 // survive — which is the case neither half may mistake for a restart.
+//
+// ⚠️ IT CAN BE WRONG IN TWO DIRECTIONS, AND THEY DO NOT COST THE SAME:
+//
+//   - A pid RECYCLED by an unrelated process makes a dead GUI read as alive. Its entry is kept,
+//     and a later stop attempts a kill through that socket, which fails and leaves the entry.
+//     The failure mode is "entry kept", never "record destroyed" — the cheaper error, since a
+//     record kept too long is removable while an erased one is not recoverable. This is the same
+//     recycled-pid caveat liveGuiSocket already documents for socket selection.
+//   - An os.Stat error other than absence — EACCES on the socket directory, say — also answers
+//     false, so the entry is dropped. That is the destructive direction, and it is the one case
+//     where this predicate erases something: an unreadable socket directory is not evidence that
+//     the GUI is gone, only that this controller cannot check. It is accepted rather than
+//     guarded because the same directory being unreadable also stops every other wezterm call,
+//     so the entries it drops are ones no call in this process could act on anyway.
 func guiAlive(guiID string) bool {
 	if guiID == "" {
 		return false
@@ -820,6 +844,15 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		return nil, err
 	}
 
+	// ⚠️ READ BEFORE THE SPAWN, SO THE GUARANTEE IS STRUCTURAL RATHER THAN A TIMING BET. This
+	// worker's own session cannot have started, because the tab that starts it does not exist
+	// yet — the read is on the far side of the spawn that creates it. Read after the spawn it
+	// would hold only by timing, and a read that did catch this worker's own id would make that
+	// id the baseline, which refreshSessionIDs then suppresses for the worker's whole life: a
+	// value equal to the baseline is never accepted, so the one id the worker does have would be
+	// the one id never reported.
+	baselineSessionID := b.taskSessionID(ctx, req.Task)
+
 	paneID, err := b.client.Spawn(
 		ctx,
 		guiID,
@@ -842,10 +875,10 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		PaneID:   paneID,
 		GuiID:    guiID,
 		// ⚠️ SessionID IS DELIBERATELY LEFT EMPTY AND CreateSessionID IS THE BASELINE IT MUST
-		// DIFFER FROM. This worker's own session cannot have started yet — the tab is only just
-		// open — so whatever the task file holds at this instant belongs to an EARLIER session
-		// of the same task and must never be reported as this worker's.
-		CreateSessionID: b.taskSessionID(ctx, req.Task),
+		// DIFFER FROM. The baseline was read before the tab existed, so whatever the task file
+		// held then belongs to an EARLIER session of the same task and must never be reported as
+		// this worker's.
+		CreateSessionID: baselineSessionID,
 	}
 	if err := b.recordWorker(ctx, guiID, workers, worker); err != nil {
 		return nil, err
@@ -903,12 +936,17 @@ func (b *localBackend) recordWorker(
 // — is dropped, and the store is rewritten without it, so the record converges on what is
 // actually running rather than on what was once created.
 //
-// ⚠️ AN ENTRY OF ANOTHER GUI IS REPORTED NOWHERE AND ERASED NOWHERE. This call cannot see that
-// GUI's panes, so it cannot say whether such a worker is running, and it must not answer either
-// way: reporting it would be a claim nothing supports, and dropping it would delete the only
-// record naming a pane that a still-running GUI holds — after which no stop could reach it. It
-// stays in the store, out of the reply, until its own GUI is provably gone and the entry is
-// dead.
+// ⚠️ AN ENTRY OF ANOTHER GUI IS REPORTED AND KEPT, NEVER ERASED. This call cannot see that
+// GUI's panes, so it cannot show such a worker to be dead — and that is the whole reason it
+// stays in the store: erasing it would delete the only record naming a pane a still-running GUI
+// holds. It is reported for the same reason, and the pair is what makes the record usable.
+// Withholding the entry from the reply while keeping it in the store leaves the task it serves
+// refused by create's dedup and reachable by no stop — an id a caller can never obtain, because
+// a backend failure carries no detail. So the id is published, and Stop resolves it: a worker of
+// another GUI is closed through that GUI's own socket.
+//
+// A worker's PaneID is meaningful only within the GUI this controller is running against, so a
+// caller should address one by WorkerID and let this backend resolve the pane.
 //
 // ⚠️ IT IS ALSO WHERE A WORKER'S SESSION ID BECOMES AVAILABLE, WHICH IS WHY IT REFRESHES IT.
 // Create cannot report it: the binding is written by the session the tab starts, and the spawn
@@ -950,16 +988,16 @@ func (b *localBackend) List(ctx context.Context) (*ListResponse, error) {
 			slog.Warn("persist reconciled worker store failed", "error", err)
 		}
 	}
-	// ⚠️ ONLY THE CURRENT GUI'S WORKERS ARE REPORTED, AND THE OTHERS ARE NOT ERASED. A worker
-	// of another GUI is one this call cannot see or check, so reporting it as running would be
-	// a claim nothing here supports; erasing it would destroy the record of a live worker. It
-	// is kept in the store and left out of the reply, which is the one answer that is true
-	// either way.
+	// ⚠️ EVERY ENTRY RECONCILE KEPT IS REPORTED, INCLUDING THE ONES OF ANOTHER GUI. Leaving those
+	// out looked like the careful answer and was the harmful one: the entry stays in the store,
+	// so create's dedup still refuses that task, while the id that would clear it appears in no
+	// reply and a backend failure reaches a caller without detail — a dead end for the task until
+	// the other GUI exits. Reporting it makes the id obtainable, and Stop already closes such a
+	// worker through its own socket, so the id is actionable as well. Nor is the running state a
+	// claim this call cannot support: reconcile kept the entry precisely because its GUI is not
+	// provably gone, and a worker this controller owns and cannot show to be dead is a worker.
 	response := make([]Worker, 0, len(reconciled))
 	for _, worker := range reconciled {
-		if worker.GuiID != guiID {
-			continue
-		}
 		response = append(response, worker.worker())
 	}
 	return &ListResponse{Workers: response}, nil
@@ -1099,11 +1137,10 @@ func (b *localBackend) killPane(ctx context.Context, guiID string, worker *Local
 //
 // ⚠️ AN EMPTY RESULT IS THE ORDINARY CASE AND MUST NOT BE FILLED IN BY GUESSING. The binding
 // is written by the session the tab starts — the work prompt's own task-anchoring step — and
-// the spawn returns as soon as the pane exists, which is before that session has even started,
-// so at create time the file usually holds nothing at all. It is read once and synchronously,
-// because one file read is not what the caller is waiting on; what it must not become is the
-// worker's reported session, since anything already in the file belongs to an earlier session
-// of the same task.
+// Create calls this BEFORE spawning that tab, so on a fresh spawn the file usually holds nothing
+// at all. It is read once and synchronously, because one file read is not what the caller is
+// waiting on; what it must not become is the worker's reported session, since anything already
+// in the file at that point belongs to an earlier session of the same task.
 //
 // An unresolvable read is reported empty rather than derived from the tab name, from the task
 // name or from a clock: a session id a caller cannot trust is worse than an absent one, because
