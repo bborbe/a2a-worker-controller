@@ -96,6 +96,18 @@ type DockerConfig struct {
 	// PortStart and PortEnd bound the host ports the backend will publish on.
 	PortStart int
 	PortEnd   int
+	// MountAllowlist is the set of host paths a caller may ask this backend to expose. Its
+	// zero value allows nothing, so a backend built without it refuses every mount — see
+	// MountAllowlist for why the empty default is the safe one here.
+	MountAllowlist MountAllowlist
+	// TeamVault resolves a declared secret's key to its value. A nil resolver refuses any
+	// create that declares a secret, rather than starting a worker whose secret is missing.
+	TeamVault TeamVaultResolver
+	// SecretDir is the host directory the resolved secret files are written into before being
+	// bind-mounted read-only into the worker. It must be private to this controller: every file
+	// in it holds a credential, and one controller's workers must never be able to read
+	// another's.
+	SecretDir string
 }
 
 // DefaultDockerConfig is the configuration the controller uses when none is supplied. Its
@@ -108,6 +120,10 @@ func DefaultDockerConfig() DockerConfig {
 		AllowedTools:  DefaultAllowedTools,
 		PortStart:     DefaultPortStart,
 		PortEnd:       DefaultPortEnd,
+		// MountAllowlist is deliberately absent: its zero value refuses every mount, and the
+		// binary is what supplies the operator's configured list.
+		TeamVault: NewTeamVaultResolver(),
+		SecretDir: DefaultSecretDir(),
 	}
 }
 
@@ -240,6 +256,17 @@ func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateR
 		return nil, err
 	}
 
+	// Refused here for the same reason as the env check above, and with more at stake: a mount
+	// outside the allowlist is an arbitrary host path on a public surface, and a secret this
+	// controller cannot resolve would leave a worker that starts and fails at its first
+	// authenticated call. Both are settled before a port, a token or a container exists.
+	if err := ValidateMounts(ctx, b.config.MountAllowlist, req.Mounts); err != nil {
+		return nil, err
+	}
+	if err := ValidateSecrets(ctx, req.Secrets); err != nil {
+		return nil, err
+	}
+
 	containers, err := b.listContainers(ctx)
 	if err != nil {
 		return nil, err
@@ -275,8 +302,25 @@ func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateR
 		return nil, err
 	}
 
-	args, env := createRun(b.config, workerID, req.Task, port, token, req.Env)
+	resolved, err := resolveSecrets(ctx, b.config.TeamVault, req.Secrets)
+	if err != nil {
+		return nil, err
+	}
+	secretPaths, err := WriteSecretFiles(ctx, b.config.SecretDir, workerID, resolved)
+	if err != nil {
+		return nil, err
+	}
+
+	args, env := createRun(
+		b.config, workerID, req.Task, port, token, req.Env, req.Mounts, secretPaths,
+	)
 	if _, err := b.client.Run(ctx, args, env); err != nil {
+		// The container never started, so the files written above have no reader. Leaving them
+		// would strand a credential on disk for a worker that does not exist — and nothing else
+		// would ever collect it, because stop only ever runs for a worker that started.
+		if cleanupErr := RemoveSecretFiles(ctx, b.config.SecretDir, workerID); cleanupErr != nil {
+			return nil, errors.Wrap(ctx, cleanupErr, "clean up secret files after failed create")
+		}
 		return nil, errors.Wrap(ctx, err, "create worker container failed")
 	}
 
@@ -325,6 +369,13 @@ func (b *dockerBackend) Stop(ctx context.Context, req StopRequest) (*StopRespons
 	}
 	if _, err := b.client.Run(ctx, []string{"rm", container.Name}, nil); err != nil {
 		return nil, errors.Wrap(ctx, err, "remove worker container failed")
+	}
+	// The container is gone, so its secret files have no reader and are removed here — the one
+	// place that knows a worker is finished. After the container rather than before: the mounts
+	// are held for its lifetime, so a removal that raced the stop would leave a running worker
+	// holding a path that no longer exists.
+	if err := RemoveSecretFiles(ctx, b.config.SecretDir, container.WorkerID); err != nil {
+		return nil, err
 	}
 	worker := container.worker()
 	worker.State = WorkerStateStopped
@@ -449,6 +500,8 @@ func createRun(
 	port int,
 	token string,
 	extraEnv map[string]string,
+	mounts []Mount,
+	secretMounts []SecretMount,
 ) ([]string, []string) {
 	baseArgs := []string{
 		"run", "-d",
@@ -469,7 +522,7 @@ func createRun(
 	}
 	// Both slices are sized up front rather than grown: each extra entry contributes one bare
 	// `-e NAME` pair to the argv, and the image closes it.
-	args := make([]string, 0, len(baseArgs)+2*len(extraEnv)+1)
+	args := make([]string, 0, len(baseArgs)+2*len(extraEnv)+2*len(mounts)+2*len(secretMounts)+1)
 	args = append(args, baseArgs...)
 	childEnv := make([]string, 0, 1+len(extraEnv))
 	childEnv = append(childEnv, tokenEnvName+"="+token)
@@ -478,6 +531,23 @@ func createRun(
 	for _, key := range sortedKeys(extraEnv) {
 		args = append(args, "-e", key)
 		childEnv = append(childEnv, key+"="+extraEnv[key])
+	}
+	// Paths come last, immediately before the image, so the argv reads in the order the flags
+	// above it are organised: settings, then what the worker can see, then what to run.
+	//
+	// ⚠️ A DECLARED MOUNT IS WRITABLE UNLESS THE CALLER SET read_only; A SECRET MOUNT NEVER IS.
+	// The asymmetry is deliberate. A caller asking for a vault it will write to has to say so,
+	// while a credential is something a worker reads — and a writable secret mount would let a
+	// compromised worker rewrite the file the next worker for that task mounts.
+	for _, mount := range mounts {
+		spec := mount.HostPath + ":" + mount.ContainerPath
+		if mount.ReadOnly {
+			spec += ":ro"
+		}
+		args = append(args, "-v", spec)
+	}
+	for _, secret := range secretMounts {
+		args = append(args, "-v", secret.HostPath+":"+SecretContainerDir+"/"+secret.Name+":ro")
 	}
 	args = append(args, config.Image)
 	return args, childEnv

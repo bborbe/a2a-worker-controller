@@ -192,7 +192,12 @@ var _ = Describe("WorkerResourceBuilder", func() {
 
 		BeforeEach(func() {
 			template = templateSecret()
-			secret = builder.BuildSecret(storedWorkerConfig(builder), template, testWorkerToken)
+			secret = builder.BuildSecret(
+				storedWorkerConfig(builder),
+				template,
+				testWorkerToken,
+				nil,
+			)
 		})
 
 		It("copies the template's credentials but replaces the bearer with the worker's own",
@@ -224,7 +229,7 @@ var _ = Describe("WorkerResourceBuilder", func() {
 		It("makes the Config the controlling owner of every object a worker is made of", func() {
 			owner := storedWorkerConfig(builder)
 			objects := []metav1.Object{
-				builder.BuildSecret(owner, templateSecret(), testWorkerToken),
+				builder.BuildSecret(owner, templateSecret(), testWorkerToken, nil),
 				builder.BuildService(owner),
 				builder.BuildIngress(owner),
 				builder.BuildNetworkPolicy(owner),

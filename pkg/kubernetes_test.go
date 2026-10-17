@@ -63,6 +63,7 @@ var _ = Describe("KubernetesBackend", func() {
 			client,
 			pkg.NewWorkerResourceBuilder(testKubernetesConfig()),
 			testTemplateName,
+			nil,
 		)
 	})
 
