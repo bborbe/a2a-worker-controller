@@ -60,6 +60,21 @@ const (
 	// so no other user has any business reading it.
 	localStoreDirMode  = 0750
 	localStoreFileMode = 0600
+	// DefaultLivenessFloor is how long Create waits for a pane it has just spawned to prove
+	// itself alive before reporting the worker.
+	//
+	// ⚠️ IT IS A BOUNDED WAIT, NOT A DELAY, AND THE DIFFERENCE IS THE WHOLE GUARD. A launcher
+	// that exits immediately — a bad path, a missing binary, a permissions error, or the
+	// `claude: command not found` this was written for — leaves a pane id WezTerm has already
+	// dropped, and the spawn call reports success either way. Nothing in the spawn reply
+	// distinguishes the two, so waiting is the only way to tell them apart. The wait is paid on
+	// every create and bought against a supervisor being told a worker started when its pane is
+	// already dead.
+	DefaultLivenessFloor = 1500 * time.Millisecond
+	// localLivenessPollInterval is how often the pane set is re-read while waiting out the
+	// floor. A pane that dies mid-wait is caught on the next tick rather than at the deadline,
+	// so the failing case costs one interval instead of the whole floor.
+	localLivenessPollInterval = 100 * time.Millisecond
 )
 
 // DefaultLocalStateFile returns the ownership store's default path, i.e.
@@ -99,6 +114,11 @@ type LocalConfig struct {
 	// It exists so a test can drive role resolution against a temporary map; a deployment never
 	// sets it, and an unusable map degrades to WindowID above rather than refusing a create.
 	RoleMapPath string
+	// LivenessFloor is how long Create waits for a freshly spawned pane to prove itself alive
+	// before reporting the worker, overriding DefaultLivenessFloor. It is configuration rather
+	// than a test hook: the wait is paid on every create, so a deployment whose launcher is
+	// slower to settle can raise it. Zero or negative means DefaultLivenessFloor.
+	LivenessFloor time.Duration
 }
 
 // LocalWorker is one worker the local backend owns, as the ownership store records it.
@@ -1067,6 +1087,23 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		return nil, errors.Wrapf(ctx, err, "spawn worker tab for task %q failed", req.Task)
 	}
 
+	// ⚠️ THE SPAWN REPLY CANNOT DISTINGUISH A LIVE PANE FROM ONE THAT ALREADY EXITED, SO IT IS
+	// NOT TRUSTED FOR THAT. `wezterm cli spawn` answers with a pane id and succeeds whether or not
+	// the tab's command survived: a launcher that dies at once — a bad path, a missing binary, a
+	// permissions error — leaves an id WezTerm has already dropped, and the reply is otherwise
+	// identical. Measured live 2026-10-17: a tab running the vault's `cc-private` hit
+	// `claude: command not found` (exit 127) while Claude Code was auto-updating, and Create
+	// reported a worker with `state: running` for the dead pane. The guard below is what turns
+	// that into a failure instead of a success the caller has no reason to doubt.
+	//
+	// ⚠️ IT RUNS BEFORE recordWorker, SO THE FAILURE PATH WRITES NO STORE ENTRY. Recording first
+	// and checking after would leave an entry for a pane that is already gone — the entry `list`
+	// then reconciles away, which is a later observation rather than a failure signal at the
+	// moment of the call, and by then the caller has been told a worker started.
+	if err := b.awaitLivePane(ctx, guiID, paneID); err != nil {
+		return nil, err
+	}
+
 	worker := LocalWorker{
 		WorkerID: workerID,
 		Task:     req.Task,
@@ -1099,6 +1136,94 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		Launcher:       chosen.Path,
 		LauncherSource: string(chosen.Source),
 	}, nil
+}
+
+// awaitLivePane waits out the liveness floor for the pane a create has just spawned, failing as
+// soon as that pane is gone.
+//
+// ⚠️ THE FAILURE IS RETURNED AS EARLY AS IT CAN BE, SO THE COMMON CASE IS NOT THE SLOW ONE. A
+// launcher that dies instantly is caught on the first read — one pane listing, not the whole
+// floor — while only a pane that survives the floor pays for it. Both are the same check: the
+// pane set is re-read on an interval until either the pane is absent or the floor is reached, so
+// a launcher that dies a second after spawn is caught exactly like one that never started.
+//
+// ⚠️ THE FLOOR IS THE GUARD'S WHOLE EXTENT. It covers the window between the spawn returning and
+// this reply being built, and nothing later: a pane that dies an hour into its worker's life is
+// outside it by design, and `list`'s own reconcile is what answers for that one.
+func (b *localBackend) awaitLivePane(ctx context.Context, guiID string, paneID string) error {
+	floor := b.config.LivenessFloor
+	if floor <= 0 {
+		floor = DefaultLivenessFloor
+	}
+	// ⚠️ THE INTERVAL IS DERIVED FROM THE FLOOR, NOT FIXED. A fixed interval would make the
+	// guard's reach a property of the constant rather than of the floor: at a floor shorter than
+	// the interval the loop would read once and never again, so a launcher dying mid-wait would
+	// be missed and the guard would silently degrade to "died before the first read". Deriving it
+	// keeps a short floor — a spec's, or a deployment's — as well covered as the default.
+	interval := min(floor/10, localLivenessPollInterval)
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	deadline := time.NewTimer(floor)
+	defer deadline.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		live, err := b.livePaneIDs(ctx, guiID)
+		if err != nil {
+			// ⚠️ A CHECK THAT FAILED IS NOT A PANE THAT DIED, AND THE DIFFERENCE DECIDES WHETHER
+			// THE PANE IS CLOSED. A failed pane listing says nothing about this pane — it may be
+			// perfectly alive — so returning here would leave a live tab that no caller was told
+			// about, that `stop` cannot reach (it resolves ownership from the store, which has no
+			// entry), and that a retry of the same create would duplicate, because the retry
+			// finds no entry for the task and passes the dedup. That is the same hazard
+			// recordWorker closes a pane for, so it is closed here too.
+			b.closeUnrecordedPane(ctx, guiID, paneID)
+			return err
+		}
+		if !live[paneID] {
+			// ⚠️ THE PANE ID GOES AFTER THE PHRASE, NOT INSIDE IT. "pane exited immediately" is
+			// the substring a caller matches on and the one the criterion names, so an id
+			// interpolated between the words — `pane "pane-1001" exited immediately` — would
+			// read as the same sentence to a human and fail every substring match.
+			//
+			// ⚠️ THIS IS THE ONE FAILURE THAT CLOSES NOTHING, AND THAT IS WHY IT IS THE ONE THE
+			// CALLER MAY RETRY BLINDLY. The pane is already absent, so there is no tab to clean
+			// up and no second tab a retry could open.
+			return errors.Errorf(ctx, "pane exited immediately: %q", paneID)
+		}
+		select {
+		case <-ctx.Done():
+			// Same reasoning as the failed listing above: a cancelled wait reaches no verdict,
+			// so the pane is closed rather than left behind unrecorded.
+			b.closeUnrecordedPane(ctx, guiID, paneID)
+			return errors.Wrapf(ctx, ctx.Err(), "await worker pane %q", paneID)
+		case <-deadline.C:
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+// closeUnrecordedPane closes a pane a create has decided not to record.
+//
+// ⚠️ IT EXISTS SO A PANE IS NEVER LEFT OPEN AND UNRECORDED, AND IT MIRRORS recordWorker'S OWN
+// CLEANUP FOR EXACTLY THAT REASON. The store is the only thing that makes a pane stoppable —
+// Stop resolves ownership from it and refuses an id it does not hold — so a pane missing from
+// the store is a live tab no caller was told about, no stop can reach, and any retry of the same
+// create would duplicate, because that retry finds no entry for the task and passes the dedup.
+//
+// ⚠️ A FAILED KILL IS LOGGED, NOT RETURNED. The caller is already on an error path carrying an
+// error of its own, and replacing it would lose the reason the create failed; the pane id goes
+// into the log so an operator can close the tab by hand.
+func (b *localBackend) closeUnrecordedPane(ctx context.Context, guiID string, paneID string) {
+	if err := b.client.KillPane(ctx, guiID, paneID); err != nil {
+		slog.Warn(
+			"close unrecorded worker pane failed",
+			"pane", paneID,
+			"error", err,
+		)
+	}
 }
 
 // recordWorker appends the new worker to the store, closing its pane again when that write
