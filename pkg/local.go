@@ -60,6 +60,21 @@ const (
 	// so no other user has any business reading it.
 	localStoreDirMode  = 0750
 	localStoreFileMode = 0600
+	// DefaultLivenessFloor is how long Create waits for a pane it has just spawned to prove
+	// itself alive before reporting the worker.
+	//
+	// ⚠️ IT IS A BOUNDED WAIT, NOT A DELAY, AND THE DIFFERENCE IS THE WHOLE GUARD. A launcher
+	// that exits immediately — a bad path, a missing binary, a permissions error, or the
+	// `claude: command not found` this was written for — leaves a pane id WezTerm has already
+	// dropped, and the spawn call reports success either way. Nothing in the spawn reply
+	// distinguishes the two, so waiting is the only way to tell them apart. The wait is paid on
+	// every create and bought against a supervisor being told a worker started when its pane is
+	// already dead.
+	DefaultLivenessFloor = 1500 * time.Millisecond
+	// localLivenessPollInterval is how often the pane set is re-read while waiting out the
+	// floor. A pane that dies mid-wait is caught on the next tick rather than at the deadline,
+	// so the failing case costs one interval instead of the whole floor.
+	localLivenessPollInterval = 100 * time.Millisecond
 )
 
 // DefaultLocalStateFile returns the ownership store's default path, i.e.
@@ -87,6 +102,11 @@ type LocalConfig struct {
 	// is part of the spawn this backend mirrors; the controller has no role map to resolve one
 	// from, so it is configured rather than derived.
 	WindowID string
+	// LivenessFloor is how long Create waits for a freshly spawned pane to prove itself alive
+	// before reporting the worker, overriding DefaultLivenessFloor. It is configuration rather
+	// than a test hook: the wait is paid on every create, so a deployment whose launcher is
+	// slower to settle can raise it. Zero or negative means DefaultLivenessFloor.
+	LivenessFloor time.Duration
 }
 
 // LocalWorker is one worker the local backend owns, as the ownership store records it.
@@ -869,6 +889,23 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		return nil, errors.Wrapf(ctx, err, "spawn worker tab for task %q failed", req.Task)
 	}
 
+	// ⚠️ THE SPAWN REPLY CANNOT DISTINGUISH A LIVE PANE FROM ONE THAT ALREADY EXITED, SO IT IS
+	// NOT TRUSTED FOR THAT. `wezterm cli spawn` answers with a pane id and succeeds whether or not
+	// the tab's command survived: a launcher that dies at once — a bad path, a missing binary, a
+	// permissions error — leaves an id WezTerm has already dropped, and the reply is otherwise
+	// identical. Measured live 2026-10-17: a tab running the vault's `cc-private` hit
+	// `claude: command not found` (exit 127) while Claude Code was auto-updating, and Create
+	// reported a worker with `state: running` for the dead pane. The guard below is what turns
+	// that into a failure instead of a success the caller has no reason to doubt.
+	//
+	// ⚠️ IT RUNS BEFORE recordWorker, SO THE FAILURE PATH WRITES NO STORE ENTRY. Recording first
+	// and checking after would leave an entry for a pane that is already gone — the entry `list`
+	// then reconciles away, which is a later observation rather than a failure signal at the
+	// moment of the call, and by then the caller has been told a worker started.
+	if err := b.awaitLivePane(ctx, guiID, paneID); err != nil {
+		return nil, err
+	}
+
 	worker := LocalWorker{
 		WorkerID: workerID,
 		Task:     req.Task,
@@ -884,6 +921,61 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		return nil, err
 	}
 	return &CreateResponse{Worker: worker.worker(), Token: ""}, nil
+}
+
+// awaitLivePane waits out the liveness floor for the pane a create has just spawned, failing as
+// soon as that pane is gone.
+//
+// ⚠️ THE FAILURE IS RETURNED AS EARLY AS IT CAN BE, SO THE COMMON CASE IS NOT THE SLOW ONE. A
+// launcher that dies instantly is caught on the first read — one pane listing, not the whole
+// floor — while only a pane that survives the floor pays for it. Both are the same check: the
+// pane set is re-read on an interval until either the pane is absent or the floor is reached, so
+// a launcher that dies a second after spawn is caught exactly like one that never started.
+//
+// ⚠️ THE FLOOR IS THE GUARD'S WHOLE EXTENT. It covers the window between the spawn returning and
+// this reply being built, and nothing later: a pane that dies an hour into its worker's life is
+// outside it by design, and `list`'s own reconcile is what answers for that one.
+func (b *localBackend) awaitLivePane(ctx context.Context, guiID string, paneID string) error {
+	floor := b.config.LivenessFloor
+	if floor <= 0 {
+		floor = DefaultLivenessFloor
+	}
+	// ⚠️ THE INTERVAL IS DERIVED FROM THE FLOOR, NOT FIXED. A fixed interval would make the
+	// guard's reach a property of the constant rather than of the floor: at a floor shorter than
+	// the interval the loop would read once and never again, so a launcher dying mid-wait would
+	// be missed and the guard would silently degrade to "died before the first read". Deriving it
+	// keeps a short floor — a spec's, or a deployment's — as well covered as the default.
+	interval := floor / 10
+	if interval > localLivenessPollInterval {
+		interval = localLivenessPollInterval
+	}
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	deadline := time.NewTimer(floor)
+	defer deadline.Stop()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		live, err := b.livePaneIDs(ctx, guiID)
+		if err != nil {
+			return err
+		}
+		if !live[paneID] {
+			// ⚠️ THE PANE ID GOES AFTER THE PHRASE, NOT INSIDE IT. "pane exited immediately" is
+			// the substring a caller matches on and the one the criterion names, so an id
+			// interpolated between the words — `pane "pane-1001" exited immediately` — would
+			// read as the same sentence to a human and fail every substring match.
+			return errors.Errorf(ctx, "pane exited immediately: %q", paneID)
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Wrapf(ctx, ctx.Err(), "await worker pane %q", paneID)
+		case <-deadline.C:
+			return nil
+		case <-ticker.C:
+		}
+	}
 }
 
 // recordWorker appends the new worker to the store, closing its pane again when that write
