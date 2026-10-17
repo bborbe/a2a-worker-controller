@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.12.1
 
 - fix: ship `teamvault-cli` in the controller image. The k8s backend resolves a declared secret by shelling out to that CLI, and a scratch image carries nothing it was not given, so a k8s `create` declaring a secret would have failed at its first lookup — after the caller was already told the create succeeded. The docker backend was unaffected: its controller runs on the operator's Mac through the launchd wrapper, which already has the CLI on `PATH`. One image serves both, so the CLI ships in it. ⚠️ **`CGO_ENABLED=0` is load-bearing and its absence fails in a way that reads as a missing file.** `go install` defaults `CGO_ENABLED` to 1, so the binary linked against the system libc; the scratch stage has none, and `exec` reported `no such file or directory` for a file that was plainly present — the build had succeeded and the `COPY` had landed it. Measured 2026-10-17: the image built clean and the CLI still could not run until this was set, which the controller's own build above already does for the same reason. ⚠️ The module path is `github.com/Seibert-Data/teamvault-cli/v5` — the Seibert org, not `bborbe` — and it is pinned to `v5.10.1` rather than `@latest`, so a release tag names a specific artifact instead of producing a different image from the same commit on different days.
 
