@@ -27,7 +27,9 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # stage has none, and exec reports `no such file or directory` for a file that is plainly present.
 # Measured 2026-10-17: the build succeeded, the COPY succeeded, and the CLI still could not run
 # until this was set. The controller's own build above already sets it for the same reason.
-RUN CGO_ENABLED=0 GOBIN=/usr/local/bin go install github.com/Seibert-Data/teamvault-cli/v5@v5.10.1
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOBIN=/usr/local/bin go install github.com/Seibert-Data/teamvault-cli/v5@v5.10.1
 CMD ["/bin/bash"]
 
 FROM alpine:3.24 AS alpine
