@@ -36,10 +36,11 @@ Optional, with defaults:
 | `-build-git-commit` | `BUILD_GIT_COMMIT` | `none` | reported build commit |
 | `-local-vault` | `LOCAL_VAULT` | — | **local backend, required**: vault root the workers' task files live in |
 | `-local-claude-script` | `LOCAL_CLAUDE_SCRIPT` | — | **local backend, required**: the vault's `claude_script` launcher every worker tab runs |
+| `-local-window-id` | `LOCAL_WINDOW_ID` | — | local backend: WezTerm window id every worker tab opens in; empty lands the tab in the window the spawning process is associated with |
 | `-local-wezterm` | `LOCAL_WEZTERM` | the app bundle's binary | local backend: absolute path to the `wezterm` binary |
 | `-local-state-file` | `LOCAL_STATE_FILE` | `~/.local/state/a2a-worker-controller/local-workers.json` | local backend: the ownership store |
 
-The local backend's four settings are checked only when it is the backend selected; a
+The local backend's two required settings are checked only when it is the backend selected; a
 controller serving containers starts without them.
 
 ⚠️ **`-local-wezterm` is an absolute path and a bare `wezterm` will not work.** Under launchd
@@ -120,11 +121,12 @@ The control reply is at `result.task.artifacts[0].parts[0].data`. A `worker` is
 
 ⚠️ **`pane_id` and `session_id` exist for workers that have no URL.** A `local` worker is a
 WezTerm tab: it serves no A2A endpoint, so `a2a_url` is **empty**, the token `create` returns
-is **empty**, and the pane id is the only handle a caller has on it — that is what `stop`
-takes, and what a supervisor messages through. `session_id` is the Claude Code session the tab
-bound to the task; it is empty until that session has bound itself, which happens after
-`create` returns, so a caller that needs it reads `list` rather than treating the empty value
-as a failure. For a `docker` or `k8s` worker both fields are empty and `a2a_url` is set.
+is **empty**, and the pane id is the only handle a caller has on it — it is what a supervisor
+messages through, while `stop` takes the `worker_id` (see the table above). `session_id` is the
+Claude Code session the tab bound to the task; it is empty until that session has bound itself,
+which happens after `create` returns, so a caller that needs it reads `list` — which re-reads
+each task file and reports the id once the binding has landed — rather than treating the empty
+value as a failure. For a `docker` or `k8s` worker both fields are empty and `a2a_url` is set.
 
 ⚠️ **A `create` for a task that already has a worker is REFUSED, and the refusal is not a
 transport failure.** Only one worker is ever started per task, and that worker's token cannot

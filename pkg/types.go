@@ -26,7 +26,8 @@ type Backend string
 type WorkerState string
 
 const (
-	// WorkerStateRunning means the worker exists and answers on its own A2A URL.
+	// WorkerStateRunning means the worker exists and is reachable: at its own A2A URL for a
+	// backend whose workers serve one, or through its pane for a tab worker, which serves none.
 	WorkerStateRunning WorkerState = "running"
 	// WorkerStateStopped means the worker no longer exists. It appears only in the reply to
 	// the stop that removed it; list never returns it.

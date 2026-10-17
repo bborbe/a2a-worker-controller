@@ -30,26 +30,27 @@ func main() {
 }
 
 type application struct {
-	SentryDSN         string `required:"true"  arg:"sentry-dsn"            env:"SENTRY_DSN"            usage:"SentryDSN"                                                                                    display:"length"`
+	SentryDSN         string `required:"true"  arg:"sentry-dsn"            env:"SENTRY_DSN"            usage:"SentryDSN"                                                                                             display:"length"`
 	SentryProxy       string `required:"false" arg:"sentry-proxy"          env:"SENTRY_PROXY"          usage:"Sentry Proxy"`
 	Listen            string `required:"true"  arg:"listen"                env:"LISTEN"                usage:"address to listen to"`
-	Backend           string `required:"false" arg:"backend"               env:"BACKEND"               usage:"backend serving workers"                                                                                       default:"docker"`
+	Backend           string `required:"false" arg:"backend"               env:"BACKEND"               usage:"backend serving workers"                                                                                                default:"docker"`
 	WorkerImage       string `required:"true"  arg:"worker-image"          env:"WORKER_IMAGE"          usage:"image every created worker container runs"`
 	A2APublicURL      string `required:"true"  arg:"a2a-public-url"        env:"A2A_PUBLIC_URL"        usage:"externally reachable A2A endpoint the card advertises"`
-	A2AAgentName      string `required:"false" arg:"a2a-agent-name"        env:"A2A_AGENT_NAME"        usage:"agent name the Agent Card advertises"                                                                          default:"a2a-worker-controller"`
-	A2AAuthToken      string `required:"true"  arg:"a2a-auth-token"        env:"A2A_AUTH_TOKEN"        usage:"bearer token every gated request must present"                                                display:"length"`
+	A2AAgentName      string `required:"false" arg:"a2a-agent-name"        env:"A2A_AGENT_NAME"        usage:"agent name the Agent Card advertises"                                                                                   default:"a2a-worker-controller"`
+	A2AAuthToken      string `required:"true"  arg:"a2a-auth-token"        env:"A2A_AUTH_TOKEN"        usage:"bearer token every gated request must present"                                                         display:"length"`
 	Namespace         string `required:"false" arg:"namespace"             env:"NAMESPACE"             usage:"k8s backend: namespace every worker is created in"`
-	WorkerTemplate    string `required:"false" arg:"worker-template"       env:"WORKER_TEMPLATE"       usage:"k8s backend: Config every worker is cloned from"                                                               default:"claude-interactive"`
+	WorkerTemplate    string `required:"false" arg:"worker-template"       env:"WORKER_TEMPLATE"       usage:"k8s backend: Config every worker is cloned from"                                                                        default:"claude-interactive"`
 	IngressDomain     string `required:"false" arg:"ingress-domain"        env:"INGRESS_DOMAIN"        usage:"k8s backend: parent domain of every worker host"`
 	TLSSecretName     string `required:"false" arg:"tls-secret-name"       env:"TLS_SECRET_NAME"       usage:"k8s backend: wildcard certificate Secret for the ingress domain"`
 	WorkerPriority    string `required:"false" arg:"worker-priority-class" env:"WORKER_PRIORITY_CLASS" usage:"k8s backend: PriorityClass every worker pod runs under (empty keeps the template's)"`
 	EgressAllow       string `required:"false" arg:"egress-allow"          env:"EGRESS_ALLOW"          usage:"k8s backend: namespace[/key=value]:port list every worker may reach besides DNS"`
 	LocalVault        string `required:"false" arg:"local-vault"           env:"LOCAL_VAULT"           usage:"local backend: vault root the workers' task files live in"`
 	LocalClaudeScript string `required:"false" arg:"local-claude-script"   env:"LOCAL_CLAUDE_SCRIPT"   usage:"local backend: vault claude_script launcher every worker tab runs"`
+	LocalWindowID     string `required:"false" arg:"local-window-id"       env:"LOCAL_WINDOW_ID"       usage:"local backend: WezTerm window id every worker tab opens in (empty: the spawning process's own window)"`
 	LocalWezterm      string `required:"false" arg:"local-wezterm"         env:"LOCAL_WEZTERM"         usage:"local backend: absolute path to the wezterm binary (defaults to the app bundle)"`
 	LocalStateFile    string `required:"false" arg:"local-state-file"      env:"LOCAL_STATE_FILE"      usage:"local backend: JSON file the worker ownership store lives in (defaults under ~/.local/state)"`
-	BuildGitVersion   string `required:"false" arg:"build-git-version"     env:"BUILD_GIT_VERSION"     usage:"Build Git version"                                                                                             default:"dev"`
-	BuildGitCommit    string `required:"false" arg:"build-git-commit"      env:"BUILD_GIT_COMMIT"      usage:"Build Git commit hash"                                                                                         default:"none"`
+	BuildGitVersion   string `required:"false" arg:"build-git-version"     env:"BUILD_GIT_VERSION"     usage:"Build Git version"                                                                                                      default:"dev"`
+	BuildGitCommit    string `required:"false" arg:"build-git-commit"      env:"BUILD_GIT_COMMIT"      usage:"Build Git commit hash"                                                                                                  default:"none"`
 }
 
 func (a *application) Run(ctx context.Context, sentryClient libsentry.Client) error {
@@ -234,6 +235,7 @@ func (a *application) localBackend(
 		pkg.LocalConfig{
 			VaultDir:     a.LocalVault,
 			ClaudeScript: a.LocalClaudeScript,
+			WindowID:     a.LocalWindowID,
 		},
 	), nil
 }

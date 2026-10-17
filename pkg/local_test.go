@@ -24,6 +24,11 @@ const (
 	testTasksDir      = "25 Tasks"
 	testTabNamePrefix = "⚙ "
 	testClaudeScript  = "/Users/bborbe/Documents/workspaces/scripts/cc-private"
+	// testGuiID stands in for the live GUI socket's path, which carries the GUI process's pid.
+	// testGuiIDAfterRestart is what the same field reads after the GUI has been restarted: a
+	// different socket, and therefore a different identity for the panes behind it.
+	testGuiID             = "/Users/bborbe/.local/share/wezterm/gui-sock-1000"
+	testGuiIDAfterRestart = "/Users/bborbe/.local/share/wezterm/gui-sock-2000"
 )
 
 // errWezterm stands in for a wezterm CLI failure.
@@ -47,7 +52,9 @@ type fakeWeztermClient struct {
 	panes    []string
 	spawns   []spawnCall
 	killed   []string
+	guiID    string
 	spawnErr error
+	paneErr  error
 	killErr  error
 }
 
@@ -66,7 +73,17 @@ func (f *fakeWeztermClient) Spawn(
 }
 
 func (f *fakeWeztermClient) PaneIDs(_ context.Context) ([]string, error) {
+	if f.paneErr != nil {
+		return nil, f.paneErr
+	}
 	return f.panes, nil
+}
+
+// GuiID answers with the GUI instance the fake is standing in for. It is a settable field, so a
+// spec can restart the GUI mid-test by changing it — which is the whole reason the backend
+// records it.
+func (f *fakeWeztermClient) GuiID(_ context.Context) (string, error) {
+	return f.guiID, nil
 }
 
 func (f *fakeWeztermClient) KillPane(_ context.Context, paneID string) error {
@@ -107,7 +124,7 @@ var _ = Describe("LocalBackend", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 		vault = GinkgoT().TempDir()
-		client = &fakeWeztermClient{}
+		client = &fakeWeztermClient{guiID: testGuiID}
 		store = pkg.NewJSONWorkerStore(filepath.Join(GinkgoT().TempDir(), "local-workers.json"))
 		backend = pkg.NewLocalBackend(client, store, pkg.LocalConfig{
 			VaultDir:     vault,
@@ -151,10 +168,14 @@ var _ = Describe("LocalBackend", func() {
 			Expect(response.Worker.PaneID).NotTo(BeEmpty())
 		})
 
-		// The whole command line is asserted, escaping included: the work prompt carries its
-		// own single quotes around the task name, so the outer quoting has to escape them —
-		// `'\''` is how a single quote survives inside a single-quoted shell word. A launcher
-		// that received the prompt unquoted would read the task name as a separate argument.
+		// The whole command line is asserted, escaping included.
+		//
+		// ⚠️ THE TASK NAME IN THE PROMPT IS DOUBLE-QUOTED, NOT SINGLE-QUOTED. The outer quoting
+		// already makes the whole prompt ONE argv element by the time the launcher sees it, so
+		// the inner quoting is prompt TEXT and never reaches a shell. The fleet's convention for
+		// that text is double quotes — the supervisor spawns a tab worker with
+		// `/vault-cli:work-on-task "<task>"` — so a worker opened here is started exactly like
+		// one the supervisor opened.
 		It("spawns the vault launcher with the tab name and the work prompt", func() {
 			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
 
@@ -162,7 +183,21 @@ var _ = Describe("LocalBackend", func() {
 			Expect(client.spawns[0].inner).To(Equal(
 				"cd '" + vault + "' && exec '" + testClaudeScript + "'" +
 					" -n '" + testTabNamePrefix + string(task) + "'" +
-					` '/vault-cli:work-on-task '\''local-backend-task'\'''`,
+					` '/vault-cli:work-on-task "local-backend-task"'`,
+			))
+		})
+
+		// ⚠️ THIS IS WHAT THE OLD SINGLE-QUOTED FORM GOT WRONG. shellQuote's output is not
+		// shell-evaluated inside the prompt, so `'it'\''s'` travelled to the launcher literally
+		// and the task name arrived mangled. Double quoting leaves the apostrophe alone; the
+		// `'\''` in the expectation below is the OUTER quoting, which is shell-evaluated and
+		// correct.
+		It("keeps an apostrophe in the task name intact in the work prompt", func() {
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: "don't-break"})
+
+			Expect(err).To(BeNil())
+			Expect(client.spawns[0].inner).To(ContainSubstring(
+				`'/vault-cli:work-on-task "don'\''t-break"'`,
 			))
 		})
 
@@ -236,6 +271,49 @@ var _ = Describe("LocalBackend", func() {
 
 			Expect(err).NotTo(BeNil())
 			Expect(err.Error()).To(ContainSubstring("AGENT_TYPE"))
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		// ⚠️ THE TASK NAME BECOMES A PATH COMPONENT, so a name that would leave the tasks
+		// directory is refused before it can be read as one — otherwise a caller could name
+		// `../../../../Users/bborbe/.claude/settings` and be handed that file's session id.
+		It("refuses a task name that would become a path outside the tasks directory", func() {
+			_, err := backend.Create(ctx, pkg.CreateRequest{
+				Task: "../../../../Users/bborbe/.claude/settings",
+			})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("not a valid task name"))
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		It("refuses a task name containing a backslash or a bare dot-dot", func() {
+			for _, name := range []pkg.TaskName{`..\..\settings`, "a..b"} {
+				_, err := backend.Create(ctx, pkg.CreateRequest{Task: name})
+
+				Expect(err).NotTo(BeNil())
+				Expect(err.Error()).To(ContainSubstring("not a valid task name"))
+			}
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		It("refuses an empty task name", func() {
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: "   "})
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("must not be empty"))
+			Expect(client.spawns).To(BeEmpty())
+		})
+
+		// The GUI is unreachable — it is not running, or its socket cannot be resolved. Nothing
+		// can be spawned and nothing may be recorded.
+		It("fails when the wezterm gui cannot be reached", func() {
+			client.paneErr = errWezterm
+
+			response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+
+			Expect(err).NotTo(BeNil())
+			Expect(response).To(BeNil())
 			Expect(client.spawns).To(BeEmpty())
 		})
 
@@ -364,6 +442,76 @@ var _ = Describe("LocalBackend", func() {
 			Expect(workers).To(HaveLen(1))
 			Expect(workers[0].WorkerID).To(Equal(created.Worker.WorkerID))
 		})
+
+		// ⚠️ LIST IS WHERE THE SESSION ID BECOMES AVAILABLE, NOT CREATE. The binding is written
+		// by the worker's own session, which starts after the spawn returns, so create records
+		// what it can read at that instant — usually nothing — and list re-reads the task file
+		// and persists what it finds. This is the contract the README states.
+		It("fills in a session id that was not readable at create time, and persists it", func() {
+			created, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+			Expect(err).To(BeNil())
+			Expect(created.Worker.SessionID).To(BeEmpty())
+
+			writeTask(task, "9f2c4a11-1111-2222-3333-444455556666")
+			response, err := backend.List(ctx)
+
+			Expect(err).To(BeNil())
+			Expect(response.Workers).To(HaveLen(1))
+			Expect(response.Workers[0].SessionID).To(Equal("9f2c4a11-1111-2222-3333-444455556666"))
+			// Persisted, not merely reported: the next list must not have to read the file again.
+			workers, listErr := store.List(ctx)
+			Expect(listErr).To(BeNil())
+			Expect(workers).To(HaveLen(1))
+			Expect(workers[0].SessionID).To(Equal("9f2c4a11-1111-2222-3333-444455556666"))
+		})
+
+		// An unresolvable id stays empty rather than being invented — a handle that resolves to
+		// nothing while looking like one is worse than an absent one.
+		It("leaves the session id empty when the task file still records none", func() {
+			_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+			Expect(err).To(BeNil())
+
+			response, err := backend.List(ctx)
+
+			Expect(err).To(BeNil())
+			Expect(response.Workers).To(HaveLen(1))
+			Expect(response.Workers[0].SessionID).To(BeEmpty())
+		})
+
+		// ⚠️ A PANE ID IS A PER-MUX COUNTER THAT RESTARTS WITH THE MUX, so an entry stored before
+		// a GUI restart can carry an id that names a live pane of the NEW GUI. The recorded GUI
+		// id is what stops that entry from being reported as a worker.
+		It("drops a worker whose GUI restarted, even when its pane id is live again", func() {
+			created, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+			Expect(err).To(BeNil())
+			// The new GUI reuses the same pane id — exactly the collision the GUI id catches.
+			client.guiID = testGuiIDAfterRestart
+			client.panes = []string{created.Worker.PaneID}
+
+			response, err := backend.List(ctx)
+
+			Expect(err).To(BeNil())
+			Expect(response.Workers).To(BeEmpty())
+			workers, listErr := store.List(ctx)
+			Expect(listErr).To(BeNil())
+			Expect(workers).To(BeEmpty())
+		})
+
+		// ⚠️ AN ERROR, NOT AN EMPTY LIST: with no GUI there is nothing to reconcile against, and
+		// an empty reply would report "no workers" for what is really "cannot tell".
+		It(
+			"reports an error rather than no workers when the wezterm gui cannot be reached",
+			func() {
+				_, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+				Expect(err).To(BeNil())
+				client.paneErr = errWezterm
+
+				response, err := backend.List(ctx)
+
+				Expect(err).NotTo(BeNil())
+				Expect(response).To(BeNil())
+			},
+		)
 	})
 
 	Describe("Stop", func() {
@@ -419,6 +567,45 @@ var _ = Describe("LocalBackend", func() {
 			Expect(listErr).To(BeNil())
 			Expect(workers).To(BeEmpty())
 		})
+
+		// The kill is the one step that can fail after ownership has been resolved, and the entry
+		// must survive it: the pane is still open, so dropping the record would orphan a live
+		// worker that no caller is told about.
+		It("fails and keeps the entry when the pane cannot be killed", func() {
+			created, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+			Expect(err).To(BeNil())
+			client.killErr = errWezterm
+
+			response, err := backend.Stop(ctx, pkg.StopRequest{WorkerID: created.Worker.WorkerID})
+
+			Expect(err).NotTo(BeNil())
+			Expect(response).To(BeNil())
+			workers, listErr := store.List(ctx)
+			Expect(listErr).To(BeNil())
+			Expect(workers).To(HaveLen(1))
+		})
+
+		// ⚠️ THE PANE ID ALONE MUST NOT DECIDE WHAT TO KILL. After a GUI restart the mux is new
+		// and pane ids restart, so a stale entry's id can name a live pane this controller never
+		// opened — killing on the id alone would close a stranger's tab.
+		It(
+			"does not kill a pane that belongs to a restarted GUI, and still drops the entry",
+			func() {
+				created, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+				Expect(err).To(BeNil())
+				client.guiID = testGuiIDAfterRestart
+				client.panes = []string{created.Worker.PaneID}
+
+				response, err := backend.Stop(
+					ctx,
+					pkg.StopRequest{WorkerID: created.Worker.WorkerID},
+				)
+
+				Expect(err).To(BeNil())
+				Expect(response.Worker.State).To(Equal(pkg.WorkerStateStopped))
+				Expect(client.killed).To(BeEmpty())
+			},
+		)
 	})
 
 	Describe("WorkerStore", func() {

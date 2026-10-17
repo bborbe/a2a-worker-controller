@@ -80,11 +80,11 @@ type LocalConfig struct {
 	// ClaudeScript is the absolute path to the vault's claude_script launcher — the `cc-*`
 	// script every worker's tab execs.
 	ClaudeScript string
-	// WindowID optionally names the WezTerm window a worker's tab opens in. Empty omits the
-	// flag entirely, and the tab then lands in the window the spawning process is associated
-	// with — which under launchd is the default window. It exists because the flag is part of
-	// the spawn this backend mirrors; the controller has no role map to resolve one from, so
-	// it is configured rather than derived.
+	// WindowID names the WezTerm window a worker's tab opens in, from LOCAL_WINDOW_ID. Empty
+	// omits the flag entirely, and the tab then lands in the window the spawning process is
+	// associated with — which under launchd is the default window. It exists because the flag
+	// is part of the spawn this backend mirrors; the controller has no role map to resolve one
+	// from, so it is configured rather than derived.
 	WindowID string
 }
 
@@ -99,11 +99,14 @@ type LocalWorker struct {
 	Task     TaskName `json:"task"`
 	// PaneID is the WezTerm pane the worker runs in. It is the worker's only handle.
 	PaneID string `json:"pane_id"`
+	// GuiID names the WezTerm GUI instance the pane belongs to: the live GUI socket's path,
+	// which carries the GUI process's own pid. It is what makes PaneID an identity rather than
+	// a bare counter — a pane id restarts from a low number when the mux is recreated, so after
+	// a GUI restart a stale entry's id can name a pane this controller never opened.
+	GuiID string `json:"gui_id"`
 	// SessionID is the Claude Code session the worker's tab bound to the task, empty until
 	// that binding lands.
 	SessionID string `json:"session_id"`
-	// CreatedAt is when the worker's tab was opened.
-	CreatedAt time.Time `json:"created_at"`
 }
 
 // worker renders the stored worker as the control API's Worker shape.
@@ -122,8 +125,6 @@ func (w LocalWorker) worker() Worker {
 		SessionID: w.SessionID,
 	}
 }
-
-//counterfeiter:generate -o ../mocks/pkg-worker-store.go --fake-name PkgWorkerStore . WorkerStore
 
 // WorkerStore persists the workers the local backend owns. It is injected, so the backend
 // reads no global and a test drives it against a temporary file.
@@ -190,17 +191,41 @@ func (s *jsonWorkerStore) Save(ctx context.Context, workers []LocalWorker) error
 	if err != nil {
 		return errors.Wrap(ctx, err, "marshal worker store failed")
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), localStoreDirMode); err != nil {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, localStoreDirMode); err != nil {
 		return errors.Wrapf(ctx, err, "create worker store directory for %q failed", s.path)
 	}
-	//nolint:gosec // G306: 0600 is the point — the store is this controller's private state
-	if err := os.WriteFile(s.path, append(content, '\n'), localStoreFileMode); err != nil {
-		return errors.Wrapf(ctx, err, "write worker store %q failed", s.path)
+	// ⚠️ WRITTEN TO A TEMPORARY FILE AND RENAMED INTO PLACE, NEVER TRUNCATED IN PLACE. A plain
+	// os.WriteFile truncates before it writes, so a crash — or a concurrent reader — between
+	// the truncate and the last byte observes a half-written file: invalid JSON, which List
+	// then refuses to parse, taking down create, list and stop until someone repairs the file
+	// by hand. rename is atomic within a filesystem, so a reader sees the old file or the new
+	// one and never a mixture.
+	//nolint:gosec // G304: the directory is the controller's own configured state directory
+	tmp, err := os.CreateTemp(dir, localStateFileName+".tmp-*")
+	if err != nil {
+		return errors.Wrapf(ctx, err, "create temporary worker store in %q failed", dir)
+	}
+	tmpName := tmp.Name()
+	// A failure at any point below must not leave the temporary file behind. After a
+	// successful rename this remove is a no-op, because the name has moved.
+	defer func() { _ = os.Remove(tmpName) }()
+	if err := tmp.Chmod(localStoreFileMode); err != nil {
+		_ = tmp.Close()
+		return errors.Wrapf(ctx, err, "set worker store mode on %q failed", tmpName)
+	}
+	if _, err := tmp.Write(append(content, '\n')); err != nil {
+		_ = tmp.Close()
+		return errors.Wrapf(ctx, err, "write worker store %q failed", tmpName)
+	}
+	if err := tmp.Close(); err != nil {
+		return errors.Wrapf(ctx, err, "close worker store %q failed", tmpName)
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		return errors.Wrapf(ctx, err, "replace worker store %q failed", s.path)
 	}
 	return nil
 }
-
-//counterfeiter:generate -o ../mocks/pkg-wezterm-client.go --fake-name PkgWeztermClient . WeztermClient
 
 // WeztermClient is the local backend's only door to WezTerm. It is injected, so the backend
 // reads no global and a test drives the real code path with a fake that records the command
@@ -213,6 +238,11 @@ type WeztermClient interface {
 	PaneIDs(ctx context.Context) ([]string, error)
 	// KillPane closes the pane paneID names.
 	KillPane(ctx context.Context, paneID string) error
+	// GuiID returns an identifier for the GUI instance the other three calls talk to — the
+	// live GUI socket's path, which carries the GUI process's own pid. It differs after a GUI
+	// restart, and that is the whole point of recording it: a pane id on its own is a per-mux
+	// counter that restarts with the mux, so only a GUI id makes it interpretable.
+	GuiID(ctx context.Context) (string, error)
 }
 
 // execWeztermClient is the WeztermClient that shells out to the wezterm binary.
@@ -264,6 +294,12 @@ func (c *execWeztermClient) KillPane(ctx context.Context, paneID string) error {
 	return err
 }
 
+// GuiID returns the live GUI socket's path. The path carries the GUI process's pid, so it
+// names one GUI instance and is a different value after a restart.
+func (c *execWeztermClient) GuiID(ctx context.Context) (string, error) {
+	return liveGuiSocket(ctx)
+}
+
 // run runs one wezterm CLI invocation and returns its standard output.
 //
 // ⚠️ THE CHILD'S ENVIRONMENT CARRIES WEZTERM_UNIX_SOCKET, AND THAT IS NOT DECORATION. A
@@ -284,17 +320,37 @@ func (c *execWeztermClient) run(ctx context.Context, args []string) (string, err
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		// args carries no credential by construction: a caller's environment travels in the
-		// tab's command line and never on this argv, so this message is safe to emit.
+		// ⚠️ THE ARGUMENTS AFTER `--` ARE DELIBERATELY ABSENT FROM THIS MESSAGE, AND THE
+		// EARLIER CLAIM THAT args "carries no credential by construction" WAS FALSE ON THE
+		// SPAWN PATH. `wezterm cli spawn` has no environment flag, so a caller's environment
+		// travels in the tab's COMMAND LINE — which is this argv's last element. Joining the
+		// whole argv into the error would persist the caller's values to the log and to Sentry
+		// on any spawn failure. describeArgs stops at the `--` separator, so the message names
+		// the operation and never the child's command.
 		return "", errors.Wrapf(
 			ctx,
 			err,
 			"wezterm %s failed: %s",
-			strings.Join(args, " "),
+			describeArgs(args),
 			strings.TrimSpace(stderr.String()),
 		)
 	}
 	return stdout.String(), nil
+}
+
+// describeArgs renders an argv for an error message, stopping at the `--` separator.
+//
+// ⚠️ IT IS A REDACTION, NOT A FORMATTING CHOICE. Everything after `--` is the child command a
+// subcommand was asked to run — on the spawn path that is the tab's command line, which
+// carries the caller's environment values (see tabCommand). Naming the operation alone is
+// enough to diagnose a failure, and the dropped half is the half that must not be persisted.
+func describeArgs(args []string) string {
+	for index, arg := range args {
+		if arg == "--" {
+			return strings.Join(args[:index], " ")
+		}
+	}
+	return strings.Join(args, " ")
 }
 
 // weztermPane is the part of `wezterm cli list --format json` this backend reads. The list
@@ -429,8 +485,28 @@ func shellEnvExports(env map[string]string) string {
 
 // tabNameFor is a worker's tab name. The task-level dedup is what makes it unique — a second
 // create for a task is refused — so no suffix is needed to disambiguate it.
+//
+// ⚠️ IT IS NOT MADE UNIQUE THE WAY THE SUPERVISOR'S OWN TAB SPAWN MAKES A TAB NAME UNIQUE, and
+// that is harmless here rather than an oversight. The supervisor's uniqueTabName exists because
+// it opens several tabs for one task and later joins on the name; this backend opens at most one
+// tab per task and never joins on a name at all — ownership is resolved from the store, by
+// worker id and pane id. The name is for a human reading the tab bar.
 func tabNameFor(task TaskName) string {
 	return localTabNamePrefix + string(task)
+}
+
+// workPrompt is the message a worker's tab is started with: the work command, then the task
+// name in DOUBLE quotes.
+//
+// ⚠️ DOUBLE QUOTES, NOT shellQuote, AND THE DIFFERENCE IS NOT COSMETIC. tabCommand single-quotes
+// the whole prompt as one unit, so this inner quoting never reaches a shell — it is prompt TEXT,
+// and it is the fleet's own convention: the supervisor spawns a tab worker with
+// `/vault-cli:work-on-task "<task>"` (claude-supervisor `docs/fleet-surface.md` § Spawn a worker,
+// `commands/open.md` § Create branch). shellQuote here would instead put a literal `'…'` into the
+// prompt text — which is not what any other spawn site sends — and a task name containing an
+// apostrophe would arrive mangled as `'it'\”s'`.
+func workPrompt(task TaskName) string {
+	return localWorkPrompt + `"` + string(task) + `"`
 }
 
 // tabCommand builds the shell command a worker's tab runs, mirroring the supervisor's own tab
@@ -453,7 +529,7 @@ func tabCommand(config LocalConfig, env map[string]string, task TaskName) string
 		"cd " + shellQuote(expandHome(config.VaultDir)) +
 		" && exec " + shellQuote(expandHome(config.ClaudeScript)) +
 		" -n " + shellQuote(tabNameFor(task)) +
-		" " + shellQuote(localWorkPrompt+shellQuote(string(task)))
+		" " + shellQuote(workPrompt(task))
 }
 
 // localEnvName matches a legal shell variable name.
@@ -479,6 +555,31 @@ func validateLocalEnv(ctx context.Context, extraEnv map[string]string) error {
 				name,
 			)
 		}
+	}
+	return nil
+}
+
+// validateTaskName refuses a task name this backend cannot turn into a task file path.
+//
+// ⚠️ THE NAME BECOMES A PATH COMPONENT, SO IT IS VALIDATED AS ONE. readTaskSessionID joins it
+// into `<vault>/25 Tasks/<name>.md`, and the name arrives unvalidated from the control API —
+// validateControlRequest checks only which operation field is set, never its contents. A name
+// carrying a separator or a `..` therefore escapes the tasks directory: `../../.claude/settings`
+// makes the controller read an arbitrary file and return its `claude_session_id` in the create
+// reply. The name is also the tab's name, so the same characters would reach a shell-adjacent
+// position there.
+func validateTaskName(ctx context.Context, task TaskName) error {
+	name := string(task)
+	if strings.TrimSpace(name) == "" {
+		return errors.Errorf(ctx, "task name must not be empty")
+	}
+	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		return errors.Errorf(
+			ctx,
+			"task %q is not a valid task name: it must contain no path separator and no %q",
+			name,
+			"..",
+		)
 	}
 	return nil
 }
@@ -531,13 +632,20 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
-	// Refused before any work, so a request carrying a reserved or unexportable name fails
-	// fast rather than after a tab has been opened for a worker that must not start.
+	// Refused before any work, so a request carrying a reserved, unexportable or path-shaped
+	// value fails fast rather than after a tab has been opened for a worker that must not start.
+	if err := validateTaskName(ctx, req.Task); err != nil {
+		return nil, err
+	}
 	if err := validateLocalEnv(ctx, req.Env); err != nil {
 		return nil, err
 	}
 
 	workers, err := b.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	guiID, err := b.guiID(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -549,7 +657,7 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	if err != nil {
 		return nil, err
 	}
-	workers = reconcileWorkers(workers, live)
+	workers = reconcileWorkers(workers, live, guiID)
 	if existing := findLocalWorkerByTask(workers, req.Task); existing != nil {
 		return nil, errors.Errorf(
 			ctx,
@@ -574,8 +682,8 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		WorkerID:  workerID,
 		Task:      req.Task,
 		PaneID:    paneID,
+		GuiID:     guiID,
 		SessionID: b.boundSessionID(ctx, req.Task),
-		CreatedAt: time.Now().UTC(),
 	}
 	if err := b.store.Save(ctx, append(workers, worker)); err != nil {
 		return nil, err
@@ -589,6 +697,19 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 // It never serves the store alone. A pane that is gone — killed by hand, or lost with the GUI
 // — is dropped, and the store is rewritten without it, so the record converges on what is
 // actually running rather than on what was once created.
+//
+// ⚠️ IT IS ALSO WHERE A WORKER'S SESSION ID BECOMES AVAILABLE, WHICH IS WHY IT REFRESHES IT.
+// Create cannot know it: the binding is written by the session the tab starts, and the spawn
+// returns as soon as the pane exists — usually before that session has begun. So create records
+// what it can read at that instant, which is normally nothing, and this call re-reads the task
+// file for every entry still missing an id and persists what it finds. A caller that needs the
+// id reads list; that is what the README promises, and it is why create stays fast and
+// non-blocking.
+//
+// ⚠️ A GUI THAT IS NOT RUNNING IS AN ERROR HERE, NOT AN EMPTY LIST. Every entry's liveness is
+// the GUI's own answer, so with no GUI there is nothing to reconcile against, and an empty reply
+// would say "no workers" for what is really "cannot tell". The error is the honest answer, and a
+// caller that must distinguish the two reads this error rather than an empty list.
 func (b *localBackend) List(ctx context.Context) (*ListResponse, error) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
@@ -597,12 +718,17 @@ func (b *localBackend) List(ctx context.Context) (*ListResponse, error) {
 	if err != nil {
 		return nil, err
 	}
+	guiID, err := b.guiID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	live, err := b.livePaneIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	reconciled := reconcileWorkers(workers, live)
-	if len(reconciled) != len(workers) {
+	reconciled := reconcileWorkers(workers, live, guiID)
+	reconciled, refreshed := b.refreshSessionIDs(ctx, reconciled)
+	if len(reconciled) != len(workers) || refreshed {
 		if err := b.store.Save(ctx, reconciled); err != nil {
 			return nil, err
 		}
@@ -633,11 +759,19 @@ func (b *localBackend) Stop(ctx context.Context, req StopRequest) (*StopResponse
 	if worker == nil {
 		return nil, errors.Errorf(ctx, "worker %q is not owned by this controller", req.WorkerID)
 	}
+	guiID, err := b.guiID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	live, err := b.livePaneIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if live[worker.PaneID] {
+	// ⚠️ THE GUI ID IS CHECKED AS WELL AS THE PANE ID, AND THAT IS WHAT STOPS A STALE ENTRY FROM
+	// KILLING A STRANGER'S PANE. A pane id restarts from a low number when the mux is recreated,
+	// so after a GUI restart an entry recorded before the restart can carry an id that now names
+	// a live pane this controller never opened; killing on the pane id alone would close it.
+	if worker.GuiID == guiID && live[worker.PaneID] {
 		if err := b.client.KillPane(ctx, worker.PaneID); err != nil {
 			return nil, errors.Wrapf(ctx, err, "kill worker pane %q failed", worker.PaneID)
 		}
@@ -654,6 +788,19 @@ func (b *localBackend) Stop(ctx context.Context, req StopRequest) (*StopResponse
 	stopped := worker.worker()
 	stopped.State = WorkerStateStopped
 	return &StopResponse{Worker: stopped}, nil
+}
+
+// guiID returns the identity of the GUI instance the client is talking to.
+//
+// Every call resolves it afresh rather than caching it, for the reason the socket is resolved
+// per call: the controller starts at login and the GUI may start later, and it changes its
+// socket — and so its identity — every time it restarts.
+func (b *localBackend) guiID(ctx context.Context) (string, error) {
+	guiID, err := b.client.GuiID(ctx)
+	if err != nil {
+		return "", errors.Wrap(ctx, err, "resolve wezterm gui identity failed")
+	}
+	return guiID, nil
 }
 
 // livePaneIDs returns the panes the GUI currently has, keyed by pane id.
@@ -690,6 +837,43 @@ func (b *localBackend) boundSessionID(ctx context.Context, task TaskName) string
 	return sessionID
 }
 
+// refreshSessionIDs fills in the session id of every worker that does not have one yet, and
+// reports whether any of them changed.
+//
+// ⚠️ AN UNRESOLVED ID IS LEFT EMPTY, AND THAT IS NOT A GAP TO PAPER OVER. The binding is written
+// by the worker's own session — the work prompt's task-anchoring step — and the supervisor
+// records that `claude -n` sets the session record's `name` but writes NO `custom-title` line
+// into the transcript, while work-on-task's session-connect resolves a session by scanning
+// transcripts for `customTitle`. So the binding may never appear at all when the launcher is
+// given `-n`, and this read then stays empty for the worker's whole life. Deriving one from the
+// tab name, the task name or a clock would hand a caller a handle that resolves to nothing while
+// looking like one, which is worse than an absent one.
+func (b *localBackend) refreshSessionIDs(
+	ctx context.Context,
+	workers []LocalWorker,
+) ([]LocalWorker, bool) {
+	changed := false
+	for index := range workers {
+		if workers[index].SessionID != "" {
+			continue
+		}
+		sessionID, err := readTaskSessionID(ctx, b.config.VaultDir, workers[index].Task)
+		if err != nil {
+			// Never fatal: the entry's pane is live, so the worker is real whether or not its
+			// task file can be read — and failing the whole list over one unreadable file
+			// would hide every other worker.
+			slog.Warn("resolve worker session id failed", "task", workers[index].Task, "error", err)
+			continue
+		}
+		if sessionID == "" {
+			continue
+		}
+		workers[index].SessionID = sessionID
+		changed = true
+	}
+	return workers, changed
+}
+
 // readTaskSessionID reads the session id the task's own frontmatter records.
 func readTaskSessionID(ctx context.Context, vaultDir string, task TaskName) (string, error) {
 	path := filepath.Join(expandHome(vaultDir), DefaultLocalTasksDir, string(task)+".md")
@@ -698,13 +882,18 @@ func readTaskSessionID(ctx context.Context, vaultDir string, task TaskName) (str
 	if err != nil {
 		return "", errors.Wrapf(ctx, err, "read task file %q failed", path)
 	}
-	return frontmatterValue(string(content), "claude_session_id"), nil
+	return frontmatterSessionID(string(content)), nil
 }
 
-// frontmatterValue returns the value of key in a page's leading YAML frontmatter block, or an
-// empty string when the block or the key is absent. Only the first block is read: everything
-// after its closing delimiter is body text, where a `key: value` line means something else.
-func frontmatterValue(content string, key string) string {
+// frontmatterSessionID returns the claude_session_id a page's leading YAML frontmatter block
+// records, or an empty string when the block or the key is absent. Only the first block is read:
+// everything after its closing delimiter is body text, where a `key: value` line means something
+// else.
+//
+// The key is fixed rather than a parameter because it is the only one the controller reads — a
+// parameter with one possible value is variation no caller uses.
+func frontmatterSessionID(content string) string {
+	const key = "claude_session_id"
 	lines := strings.Split(content, "\n")
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
 		return ""
@@ -736,10 +925,16 @@ func expandHome(path string) string {
 }
 
 // reconcileWorkers returns the workers whose pane is still open, in their stored order.
-func reconcileWorkers(workers []LocalWorker, live map[string]bool) []LocalWorker {
+//
+// ⚠️ A PANE ID MATCHES ONLY WITHIN ONE GUI INSTANCE. A pane id is a per-mux counter, and the mux
+// is recreated when the GUI restarts, so the ids restart from a low number: an entry recorded
+// before a restart can carry an id that now names an unrelated pane, and matching on the id
+// alone would report a phantom worker and let a stop kill a pane this controller never opened.
+// The recorded GUI id is what makes the two distinguishable, and a mismatch drops the entry.
+func reconcileWorkers(workers []LocalWorker, live map[string]bool, guiID string) []LocalWorker {
 	reconciled := make([]LocalWorker, 0, len(workers))
 	for _, worker := range workers {
-		if live[worker.PaneID] {
+		if worker.GuiID == guiID && live[worker.PaneID] {
 			reconciled = append(reconciled, worker)
 		}
 	}
