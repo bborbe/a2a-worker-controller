@@ -45,6 +45,7 @@ LAUNCHD_PLIST ?= $(HOME)/Library/LaunchAgents/$(LAUNCHD_LABEL).plist
 install:
 	@security find-identity -p codesigning | grep -qF '"$(CODESIGN_IDENTITY)"' \
 		|| { echo "codesign identity '$(CODESIGN_IDENTITY)' not in keychain; check: security find-identity -p codesigning" >&2; exit 1; }
+	@test -f "$(LAUNCHD_PLIST)" || { echo "plist not installed: $(LAUNCHD_PLIST)" >&2; exit 1; }
 	mkdir -p "$(dir $(INSTALL_BIN))"
 	go build -o "$(INSTALL_BIN).new" .
 	codesign -f -s "$(CODESIGN_IDENTITY)" -i $(CODESIGN_ID) "$(INSTALL_BIN).new"
@@ -61,10 +62,10 @@ install:
 .PHONY: launchd-baseline
 launchd-baseline:
 	@test -f "$(LAUNCHD_PLIST)" || { echo "plist not installed: $(LAUNCHD_PLIST)" >&2; exit 1; }
-	/usr/libexec/PlistBuddy -c 'Delete :ThrottleInterval' "$(LAUNCHD_PLIST)" 2>/dev/null || true
-	/usr/libexec/PlistBuddy -c 'Add :ThrottleInterval integer 30' "$(LAUNCHD_PLIST)"
-	/usr/libexec/PlistBuddy -c 'Delete :SoftResourceLimits' "$(LAUNCHD_PLIST)" 2>/dev/null || true
-	/usr/libexec/PlistBuddy -c 'Add :SoftResourceLimits:NumberOfFiles integer 4096' "$(LAUNCHD_PLIST)"
+	/usr/libexec/PlistBuddy -c 'Set :ThrottleInterval 30' "$(LAUNCHD_PLIST)" 2>/dev/null \
+		|| /usr/libexec/PlistBuddy -c 'Add :ThrottleInterval integer 30' "$(LAUNCHD_PLIST)"
+	/usr/libexec/PlistBuddy -c 'Set :SoftResourceLimits:NumberOfFiles 4096' "$(LAUNCHD_PLIST)" 2>/dev/null \
+		|| /usr/libexec/PlistBuddy -c 'Add :SoftResourceLimits:NumberOfFiles integer 4096' "$(LAUNCHD_PLIST)"
 	plutil -lint "$(LAUNCHD_PLIST)"
 
 # bootout + bootstrap, never `kickstart -k`: kickstart keeps the plist launchd
