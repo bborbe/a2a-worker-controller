@@ -18,6 +18,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/bborbe/errors"
 )
@@ -107,6 +108,18 @@ type LocalWorker struct {
 	// SessionID is the Claude Code session the worker's tab bound to the task, empty until
 	// that binding lands.
 	SessionID string `json:"session_id"`
+	// CreateSessionID is the session id the task file ALREADY CARRIED when this worker was
+	// created — in practice the id of an earlier session of the same task, because this
+	// worker's own session cannot have started before its tab did.
+	//
+	// ⚠️ IT EXISTS SO THAT AN EARLIER SESSION'S ID IS NEVER REPORTED AS THIS WORKER'S. The
+	// task-scoped `claude_session_id` frontmatter field is stamped by the vault when it is
+	// empty and LEFT ALONE on every later binding, so once a worker has been stopped and
+	// another created for the same task, the file still names the STOPPED worker's session —
+	// and nothing ever rewrites it, so that value would otherwise be permanent. The snapshot
+	// is what refreshSessionIDs measures against: a value that was already there when this
+	// worker started cannot be its own, and a value that appeared afterwards can.
+	CreateSessionID string `json:"create_session_id"`
 }
 
 // worker renders the stored worker as the control API's Worker shape.
@@ -131,6 +144,13 @@ func (w LocalWorker) worker() Worker {
 //
 // List and Save are the whole surface: the backend reads the set, changes it, and writes it
 // back under its own mutex, so there is no per-entry mutation to get wrong.
+//
+// ⚠️ THE STORE IS SINGLE-WRITER BY CONTRACT, AND THAT IS A PROPERTY OF THE CONFIGURATION
+// RATHER THAN OF THIS INTERFACE. Save replaces the file's whole contents, so two controllers
+// pointed at one path would each overwrite the other's set: the last write wins and the other
+// controller's workers are left running with no record naming them, which is exactly the
+// state Stop cannot reach. The backend's mutex serializes its calls within ONE process and
+// nothing serializes two processes, so one state file belongs to exactly one controller.
 type WorkerStore interface {
 	// List returns every worker the store holds, empty when the store does not exist yet.
 	List(ctx context.Context) ([]LocalWorker, error)
@@ -231,18 +251,24 @@ func (s *jsonWorkerStore) Save(ctx context.Context, workers []LocalWorker) error
 // reads no global and a test drives the real code path with a fake that records the command
 // line it was handed — no GUI and no pane required.
 type WeztermClient interface {
-	// Spawn opens a tab running inner as `bash -lc inner`, in the window windowID names when
-	// it is not empty, and returns the new pane's id.
-	Spawn(ctx context.Context, windowID string, inner string) (string, error)
-	// PaneIDs returns the id of every pane the GUI currently has.
-	PaneIDs(ctx context.Context) ([]string, error)
-	// KillPane closes the pane paneID names.
-	KillPane(ctx context.Context, paneID string) error
 	// GuiID returns an identifier for the GUI instance the other three calls talk to — the
 	// live GUI socket's path, which carries the GUI process's own pid. It differs after a GUI
 	// restart, and that is the whole point of recording it: a pane id on its own is a per-mux
 	// counter that restarts with the mux, so only a GUI id makes it interpretable.
+	//
+	// ⚠️ IT IS RESOLVED ONCE PER BACKEND CALL AND THEN PASSED TO EVERY OTHER METHOD, RATHER
+	// THAN RESOLVED AGAIN INSIDE EACH. The resolution picks the NEWEST live socket, so two
+	// resolutions within one call can name two different GUIs, and a GUI that restarts between
+	// them would have a pane opened in one GUI recorded under the other's identity — which is
+	// the single thing the recorded identity exists to prevent.
 	GuiID(ctx context.Context) (string, error)
+	// Spawn opens a tab running inner as `bash -lc inner`, in the GUI guiID names, in the
+	// window windowID names when it is not empty, and returns the new pane's id.
+	Spawn(ctx context.Context, guiID string, windowID string, inner string) (string, error)
+	// PaneIDs returns the id of every pane the GUI guiID names has.
+	PaneIDs(ctx context.Context, guiID string) ([]string, error)
+	// KillPane closes the pane paneID names in the GUI guiID names.
+	KillPane(ctx context.Context, guiID string, paneID string) error
 }
 
 // execWeztermClient is the WeztermClient that shells out to the wezterm binary.
@@ -264,14 +290,19 @@ func NewWeztermCLIClient(binary string) WeztermClient {
 // output, which is what wezterm documents as its success signal.
 func (c *execWeztermClient) Spawn(
 	ctx context.Context,
+	guiID string,
 	windowID string,
 	inner string,
 ) (string, error) {
-	stdout, err := c.run(ctx, spawnArgs(windowID, inner))
+	stdout, err := c.run(ctx, guiID, spawnArgs(windowID, inner))
 	if err != nil {
 		return "", err
 	}
-	paneID := strings.TrimSpace(stdout)
+	// ⚠️ THE FIRST LINE, NOT THE WHOLE TRIMMED OUTPUT. Anything wezterm prints after the id —
+	// a warning, a deprecation note — would otherwise be folded into the pane id, and a pane
+	// id that names no pane is not a visible error: the worker is recorded, and every later
+	// reconcile reads it as a worker whose pane is gone.
+	paneID := firstLine(stdout)
 	if paneID == "" {
 		return "", errors.Errorf(ctx, "wezterm cli spawn returned no pane id")
 	}
@@ -279,8 +310,8 @@ func (c *execWeztermClient) Spawn(
 }
 
 // PaneIDs lists the GUI's panes.
-func (c *execWeztermClient) PaneIDs(ctx context.Context) ([]string, error) {
-	stdout, err := c.run(ctx, []string{"cli", "list", "--format", "json"})
+func (c *execWeztermClient) PaneIDs(ctx context.Context, guiID string) ([]string, error) {
+	stdout, err := c.run(ctx, guiID, []string{"cli", "list", "--format", "json"})
 	if err != nil {
 		return nil, err
 	}
@@ -289,33 +320,35 @@ func (c *execWeztermClient) PaneIDs(ctx context.Context) ([]string, error) {
 
 // KillPane closes a pane. Killing the pane is what stops the worker: the pane's process is
 // the worker, so there is nothing else to stop.
-func (c *execWeztermClient) KillPane(ctx context.Context, paneID string) error {
-	_, err := c.run(ctx, []string{"cli", "kill-pane", "--pane-id", paneID})
+func (c *execWeztermClient) KillPane(ctx context.Context, guiID string, paneID string) error {
+	_, err := c.run(ctx, guiID, []string{"cli", "kill-pane", "--pane-id", paneID})
 	return err
 }
 
 // GuiID returns the live GUI socket's path. The path carries the GUI process's pid, so it
 // names one GUI instance and is a different value after a restart.
 func (c *execWeztermClient) GuiID(ctx context.Context) (string, error) {
-	return liveGuiSocket(ctx)
+	dir, err := weztermSocketDir(ctx)
+	if err != nil {
+		return "", err
+	}
+	return liveGuiSocket(ctx, dir)
 }
 
-// run runs one wezterm CLI invocation and returns its standard output.
+// run runs one wezterm CLI invocation against the GUI guiID names, and returns its standard
+// output.
 //
 // ⚠️ THE CHILD'S ENVIRONMENT CARRIES WEZTERM_UNIX_SOCKET, AND THAT IS NOT DECORATION. A
 // launchd job has no WEZTERM_UNIX_SOCKET, so `wezterm cli` falls back to
 // ~/.local/share/wezterm/sock — a separate mux server, not the GUI — and then answers with no
-// panes rather than with an error. The socket is resolved per call rather than once at
-// construction, because the controller starts at login and the GUI may start later, and
-// because the GUI's socket changes every time it restarts.
-func (c *execWeztermClient) run(ctx context.Context, args []string) (string, error) {
-	socket, err := liveGuiSocket(ctx)
-	if err != nil {
-		return "", err
-	}
+// panes rather than with an error. The socket is resolved once per backend call rather than
+// once at construction, because the controller starts at login and the GUI may start later,
+// and because the GUI's socket changes every time it restarts; within one call every
+// invocation is handed the same one, so they cannot address two different GUIs.
+func (c *execWeztermClient) run(ctx context.Context, guiID string, args []string) (string, error) {
 	//nolint:gosec // G204: the binary is this backend's configured absolute path, not input
 	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Env = envWithSocket(os.Environ(), socket)
+	cmd.Env = envWithSocket(os.Environ(), guiID)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -375,20 +408,35 @@ func firstLine(s string) string {
 // carries a pane's window, title and cwd as well; none of them is an ownership signal, so
 // none of them is parsed.
 type weztermPane struct {
-	PaneID int `json:"pane_id"`
+	// ⚠️ A POINTER, SO AN ABSENT FIELD IS DISTINGUISHABLE FROM THE VALUE 0. As a plain int a
+	// renamed or dropped field unmarshals to 0, and the pane list then reads as a GUI holding
+	// one pane numbered "0" — every real pane missing, so every stored worker is judged dead
+	// and erased. A field wezterm no longer sends must fail this call loudly instead.
+	PaneID *int `json:"pane_id"`
 }
 
 // parsePaneIDs reads the pane ids out of `wezterm cli list --format json`. The pane id is a
 // JSON number there and a string on the control API's schema, so it is formatted rather than
 // passed through.
+//
+// A pane carrying no pane_id is an error rather than a skipped entry: the list is what decides
+// which workers are alive, so an entry that cannot be read must not quietly shrink the set.
+// An empty list is not an error — a GUI with no panes has none, and that answer is a real one.
 func parsePaneIDs(ctx context.Context, stdout string) ([]string, error) {
 	var panes []weztermPane
 	if err := json.Unmarshal([]byte(stdout), &panes); err != nil {
 		return nil, errors.Wrap(ctx, err, "parse wezterm pane list failed")
 	}
 	paneIDs := make([]string, 0, len(panes))
-	for _, pane := range panes {
-		paneIDs = append(paneIDs, strconv.Itoa(pane.PaneID))
+	for index, pane := range panes {
+		if pane.PaneID == nil {
+			return nil, errors.Errorf(
+				ctx,
+				"parse wezterm pane list failed: entry %d carries no pane_id",
+				index,
+			)
+		}
+		paneIDs = append(paneIDs, strconv.Itoa(*pane.PaneID))
 	}
 	return paneIDs, nil
 }
@@ -424,19 +472,28 @@ func envWithSocket(env []string, socket string) []string {
 // weztermSocketName matches the per-GUI socket files WezTerm creates, gui-sock-<pid>.
 var weztermSocketName = regexp.MustCompile(`^gui-sock-(\d+)$`)
 
-// liveGuiSocket returns the newest live GUI socket under ~/.local/share/wezterm.
+// weztermSocketDir returns the directory WezTerm keeps its per-GUI sockets in,
+// ~/.local/share/wezterm.
+func weztermSocketDir(ctx context.Context) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", errors.Wrap(ctx, err, "resolve home directory failed")
+	}
+	return filepath.Join(home, localSocketDir), nil
+}
+
+// liveGuiSocket returns the newest live GUI socket in dir.
 //
 // Liveness is the pid in the file's own name: a socket whose GUI has exited is left behind by
 // the kernel, so its presence proves nothing and its pid does. A pid recycled by an unrelated
 // process reads as live, which is why the newest one is preferred — a stale file is old by
 // definition. No live socket is an error rather than a fallback to the mux socket, because
 // the mux socket is exactly the wrong server this resolution exists to avoid.
-func liveGuiSocket(ctx context.Context) (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", errors.Wrap(ctx, err, "resolve home directory failed")
-	}
-	dir := filepath.Join(home, localSocketDir)
+//
+// The directory is a parameter rather than resolved here so a spec can drive this against a
+// temporary directory: the alternative is a test that either needs a running GUI or asserts
+// nothing about the selection rule at all.
+func liveGuiSocket(ctx context.Context, dir string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return "", errors.Wrapf(ctx, err, "read wezterm socket directory %q failed", dir)
@@ -472,6 +529,38 @@ func processAlive(pidText string) bool {
 	}
 	err = syscall.Kill(pid, 0)
 	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+// guiAlive reports whether the GUI instance guiID names is still running.
+//
+// ⚠️ IT IS THE PREDICATE THAT SEPARATES A SECOND GUI FROM A RESTART, AND BOTH OF ITS HALVES ARE
+// LOAD-BEARING. An entry whose GUI is not the current one cannot have its pane checked at all,
+// so the only honest reading of it is "this controller cannot tell"; erasing it on that basis
+// alone would destroy, irreversibly, the record of a worker a second, still-running GUI holds —
+// and a pane with no record is a pane no stop can reach.
+//
+//   - The socket being GONE proves the GUI is gone: a restart removes it.
+//   - The pid in the socket's own file name being DEAD proves it too, and is what stops a GUI
+//     that died UNCLEANLY from wedging a task forever. The kernel leaves such a socket on disk,
+//     so existence alone would keep its entries alive: never reported by list, because they
+//     belong to another GUI, and still seen by create's dedup, which refuses every later create
+//     for their tasks while the id that would clear them is reachable from nowhere a caller can
+//     look.
+//
+// A GUI genuinely running alongside the current one satisfies both halves, so its records
+// survive — which is the case neither half may mistake for a restart.
+func guiAlive(guiID string) bool {
+	if guiID == "" {
+		return false
+	}
+	if _, err := os.Stat(guiID); err != nil {
+		return false
+	}
+	match := weztermSocketName.FindStringSubmatch(filepath.Base(guiID))
+	if match == nil {
+		return false
+	}
+	return processAlive(match[1])
 }
 
 // shellQuote single-quotes a value for POSIX sh, so a task name containing a quote or a space
@@ -599,6 +688,31 @@ func validateTaskName(ctx context.Context, task TaskName) error {
 			"..",
 		)
 	}
+	// ⚠️ THE DOUBLE QUOTE IS REFUSED FOR THE WORK PROMPT, NOT FOR THE PATH, AND IT IS THE ONE
+	// GAP IN AN OTHERWISE COMPLETE QUOTING STORY. workPrompt renders the name between unescaped
+	// double quotes — that is the fleet's own prompt convention, and the quoting is never
+	// shell-evaluated because tabCommand single-quotes the whole prompt as one argv element —
+	// so a name containing `"` produces a prompt whose quoting is broken: `a"b` yields
+	// `/vault-cli:work-on-task "a"b"`, which is not the command any other spawn site would
+	// have sent. It is not an injection; it is a prompt that no longer says what it means, and
+	// the name is refused rather than escaped because no vault task name needs one.
+	if strings.ContainsRune(name, '"') {
+		return errors.Errorf(
+			ctx,
+			"task %q is not a valid task name: it must contain no %s",
+			name,
+			`"`,
+		)
+	}
+	// A control character is refused for the same reason and a second one: the name is also a
+	// tab name, and a newline in it splits the tab bar entry rather than being displayed.
+	if strings.ContainsFunc(name, unicode.IsControl) {
+		return errors.Errorf(
+			ctx,
+			"task %q is not a valid task name: it must contain no control character",
+			name,
+		)
+	}
 	return nil
 }
 
@@ -644,8 +758,19 @@ func NewLocalBackend(client WeztermClient, store WorkerStore, config LocalConfig
 // id alone. The refusal's wording is the docker backend's verbatim, so a caller sees one
 // refusal shape whichever backend answered — even though this backend mints no token to lose.
 //
+// ⚠️ AN ENTRY KEPT FOR A GUI THIS CONTROLLER CANNOT SEE COUNTS AS AN EXISTING WORKER HERE. That
+// pane may still be running and cannot be checked, so refusing is the only answer that cannot
+// start a second tab beside it; the alternative — treating an unverifiable worker as absent —
+// is the one outcome the one-worker-per-task rule exists to prevent.
+//
 // The returned Token is EMPTY, and that is not a failure: a tab worker serves no A2A
 // endpoint, so there is nothing to authenticate to. The pane id is the handle instead.
+//
+// ⚠️ The returned SessionID is EMPTY TOO, AND THAT IS ALSO BY CONSTRUCTION RATHER THAN A GAP.
+// The session a worker binds to is written by that session, which the tab starts — after this
+// call has already returned — so anything the task file holds now belongs to an EARLIER session
+// of the same task. It is read once and kept as the worker's CreateSessionID, the baseline
+// `list` measures a real binding against, and it is never reported as this worker's own.
 func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateResponse, error) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
@@ -663,6 +788,10 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	if err != nil {
 		return nil, err
 	}
+	// ⚠️ RESOLVED ONCE AND THEN PASSED TO EVERY WEZTERM CALL BELOW. Resolving it again inside
+	// the spawn would let a GUI restart between the two resolutions open the pane in one GUI
+	// and record it under the other's identity — the one thing the recorded identity exists to
+	// prevent, and the state that makes a live pane unreachable to a later stop.
 	guiID, err := b.guiID(ctx)
 	if err != nil {
 		return nil, err
@@ -671,7 +800,7 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	// more, and leaving it in the set would refuse every later create for its task — naming a
 	// worker whose stop then fails because there is no pane left to kill. The reconcile is
 	// what keeps "stop and create another" a recovery a caller can actually complete.
-	live, err := b.livePaneIDs(ctx)
+	live, err := b.livePaneIDs(ctx, guiID)
 	if err != nil {
 		return nil, err
 	}
@@ -691,38 +820,103 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		return nil, err
 	}
 
-	paneID, err := b.client.Spawn(ctx, b.config.WindowID, tabCommand(b.config, req.Env, req.Task))
+	paneID, err := b.client.Spawn(
+		ctx,
+		guiID,
+		b.config.WindowID,
+		tabCommand(b.config, req.Env, req.Task),
+	)
 	if err != nil {
+		// ⚠️ THE PANE ID IS GENUINELY UNKNOWN ON THIS PATH, WHICH IS WHY NONE IS NAMED HERE.
+		// A spawn that reports failure can still have opened the pane: run uses
+		// exec.CommandContext, so a cancelled request kills the wezterm CLI while the GUI it
+		// had already asked for a tab keeps that tab. There is then a live pane with no id to
+		// kill and none to report — a different case from the failed record below, where the
+		// id is known and is named precisely because this one cannot be.
 		return nil, errors.Wrapf(ctx, err, "spawn worker tab for task %q failed", req.Task)
 	}
 
 	worker := LocalWorker{
-		WorkerID:  workerID,
-		Task:      req.Task,
-		PaneID:    paneID,
-		GuiID:     guiID,
-		SessionID: b.boundSessionID(ctx, req.Task),
+		WorkerID: workerID,
+		Task:     req.Task,
+		PaneID:   paneID,
+		GuiID:    guiID,
+		// ⚠️ SessionID IS DELIBERATELY LEFT EMPTY AND CreateSessionID IS THE BASELINE IT MUST
+		// DIFFER FROM. This worker's own session cannot have started yet — the tab is only just
+		// open — so whatever the task file holds at this instant belongs to an EARLIER session
+		// of the same task and must never be reported as this worker's.
+		CreateSessionID: b.taskSessionID(ctx, req.Task),
 	}
-	if err := b.store.Save(ctx, append(workers, worker)); err != nil {
+	if err := b.recordWorker(ctx, guiID, workers, worker); err != nil {
 		return nil, err
 	}
 	return &CreateResponse{Worker: worker.worker(), Token: ""}, nil
 }
 
-// List returns every worker this controller owns whose pane is still open, reconciled against
-// the live panes on every call.
+// recordWorker appends the new worker to the store, closing its pane again when that write
+// fails.
+//
+// ⚠️ THE PANE IS ALREADY OPEN BY THE TIME THIS RUNS, SO A FAILED WRITE MUST NOT LEAVE IT
+// RUNNING UNRECORDED. The store is the only thing that makes a pane stoppable — Stop resolves
+// ownership from it and refuses an id it does not hold — so a pane missing from the store is a
+// live tab no caller was ever told about and no stop can reach, and a retry of the same create
+// would find no entry for the task, pass the dedup, and open a SECOND tab for it. The pane is
+// therefore closed again before the error is returned, and the error names it either way so an
+// operator can close it by hand when the kill fails too.
+func (b *localBackend) recordWorker(
+	ctx context.Context,
+	guiID string,
+	workers []LocalWorker,
+	worker LocalWorker,
+) error {
+	if err := b.store.Save(ctx, append(workers, worker)); err != nil {
+		if killErr := b.client.KillPane(ctx, guiID, worker.PaneID); killErr != nil {
+			slog.Warn(
+				"close orphaned worker pane failed",
+				"task", worker.Task,
+				"pane", worker.PaneID,
+				"error", killErr,
+			)
+			return errors.Wrapf(
+				ctx,
+				err,
+				"record worker for task %q failed; pane %q left open",
+				worker.Task,
+				worker.PaneID,
+			)
+		}
+		return errors.Wrapf(
+			ctx,
+			err,
+			"record worker for task %q failed; pane %q was closed",
+			worker.Task,
+			worker.PaneID,
+		)
+	}
+	return nil
+}
+
+// List returns every worker this controller owns whose pane is still open in the CURRENT GUI,
+// reconciled against the live panes on every call.
 //
 // It never serves the store alone. A pane that is gone — killed by hand, or lost with the GUI
 // — is dropped, and the store is rewritten without it, so the record converges on what is
 // actually running rather than on what was once created.
 //
+// ⚠️ AN ENTRY OF ANOTHER GUI IS REPORTED NOWHERE AND ERASED NOWHERE. This call cannot see that
+// GUI's panes, so it cannot say whether such a worker is running, and it must not answer either
+// way: reporting it would be a claim nothing supports, and dropping it would delete the only
+// record naming a pane that a still-running GUI holds — after which no stop could reach it. It
+// stays in the store, out of the reply, until its own GUI is provably gone and the entry is
+// dead.
+//
 // ⚠️ IT IS ALSO WHERE A WORKER'S SESSION ID BECOMES AVAILABLE, WHICH IS WHY IT REFRESHES IT.
-// Create cannot know it: the binding is written by the session the tab starts, and the spawn
-// returns as soon as the pane exists — usually before that session has begun. So create records
-// what it can read at that instant, which is normally nothing, and this call re-reads the task
-// file for every entry still missing an id and persists what it finds. A caller that needs the
-// id reads list; that is what the README promises, and it is why create stays fast and
-// non-blocking.
+// Create cannot report it: the binding is written by the session the tab starts, and the spawn
+// returns as soon as the pane exists — before that session has begun. So create reads the task
+// file once, records what it finds as the baseline the worker's own binding must differ from,
+// and reports no session at all; this call re-reads EVERY entry's task file and reports the id
+// once the file holds a value that is not that baseline. A caller that needs the id reads list;
+// that is what the README promises, and it is why create stays fast and non-blocking.
 //
 // ⚠️ A GUI THAT IS NOT RUNNING IS AN ERROR HERE, NOT AN EMPTY LIST. Every entry's liveness is
 // the GUI's own answer, so with no GUI there is nothing to reconcile against, and an empty reply
@@ -740,19 +934,32 @@ func (b *localBackend) List(ctx context.Context) (*ListResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	live, err := b.livePaneIDs(ctx)
+	live, err := b.livePaneIDs(ctx, guiID)
 	if err != nil {
 		return nil, err
 	}
 	reconciled := reconcileWorkers(workers, live, guiID)
 	reconciled, refreshed := b.refreshSessionIDs(ctx, reconciled)
 	if len(reconciled) != len(workers) || refreshed {
+		// ⚠️ LOGGED, NOT RETURNED. The reply is fully computable without this write: the
+		// reconcile already decided what is running, and the store is only being brought into
+		// line with that answer. Failing the call would report "cannot tell you" for a question
+		// this call has just answered — on the fleet's polling path, and over a bookkeeping
+		// write whose failure the next call retries anyway.
 		if err := b.store.Save(ctx, reconciled); err != nil {
-			return nil, err
+			slog.Warn("persist reconciled worker store failed", "error", err)
 		}
 	}
+	// ⚠️ ONLY THE CURRENT GUI'S WORKERS ARE REPORTED, AND THE OTHERS ARE NOT ERASED. A worker
+	// of another GUI is one this call cannot see or check, so reporting it as running would be
+	// a claim nothing here supports; erasing it would destroy the record of a live worker. It
+	// is kept in the store and left out of the reply, which is the one answer that is true
+	// either way.
 	response := make([]Worker, 0, len(reconciled))
 	for _, worker := range reconciled {
+		if worker.GuiID != guiID {
+			continue
+		}
 		response = append(response, worker.worker())
 	}
 	return &ListResponse{Workers: response}, nil
@@ -765,6 +972,12 @@ func (b *localBackend) List(ctx context.Context) (*ListResponse, error) {
 // the store does hold whose pane has already gone is NOT an error — there is nothing left to
 // kill, so its record is removed and it is reported stopped, which keeps a caller's recovery
 // from being blocked by a pane that died on its own.
+//
+// ⚠️ A WORKER OF ANOTHER, STILL-RUNNING GUI IS KILLED THROUGH THAT GUI'S OWN SOCKET, NOT
+// UNTRACKED. The recorded GuiID is that GUI's socket, so the kill can reach a pane this call
+// cannot list — and reaching it is the point: a record removed without the pane being closed
+// leaves a live tab that nothing names any more. The record is removed without a kill only when
+// the worker's GUI is provably gone, because then there is no pane left to close.
 func (b *localBackend) Stop(ctx context.Context, req StopRequest) (*StopResponse, error) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
@@ -781,7 +994,7 @@ func (b *localBackend) Stop(ctx context.Context, req StopRequest) (*StopResponse
 	if err != nil {
 		return nil, err
 	}
-	live, err := b.livePaneIDs(ctx)
+	live, err := b.livePaneIDs(ctx, guiID)
 	if err != nil {
 		return nil, err
 	}
@@ -789,10 +1002,32 @@ func (b *localBackend) Stop(ctx context.Context, req StopRequest) (*StopResponse
 	// KILLING A STRANGER'S PANE. A pane id restarts from a low number when the mux is recreated,
 	// so after a GUI restart an entry recorded before the restart can carry an id that now names
 	// a live pane this controller never opened; killing on the pane id alone would close it.
-	if worker.GuiID == guiID && live[worker.PaneID] {
-		if err := b.client.KillPane(ctx, worker.PaneID); err != nil {
-			return nil, errors.Wrapf(ctx, err, "kill worker pane %q failed", worker.PaneID)
+	switch {
+	case worker.GuiID == guiID:
+		// The pane is in the GUI this call is already talking to, so its own pane list is the
+		// truth about it: a pane that is not there has nothing left to kill, and the entry is
+		// removed without one.
+		if live[worker.PaneID] {
+			if err := b.killPane(ctx, guiID, worker); err != nil {
+				return nil, err
+			}
 		}
+	case guiAlive(worker.GuiID):
+		// ⚠️ THE KILL GOES THROUGH THE WORKER'S OWN SOCKET, WHICH IS WHAT MAKES A STOP STOP THE
+		// WORKER INSTEAD OF MERELY UNTRACKING IT. A worker of a GUI that is still running beside
+		// this one is one this call cannot see, so it cannot be checked — but it can be reached:
+		// the recorded GuiID is that GUI's socket, and kill-pane addressed to it closes the pane.
+		// Removing the record instead would leave a live tab running with nothing naming it, which
+		// is precisely the state no later call could ever clean up. The pane is not pre-checked
+		// here because this GUI's pane list says nothing about that one; killPane re-reads THAT
+		// GUI's panes when the kill fails, which is where "already gone" is decided.
+		if err := b.killPane(ctx, worker.GuiID, worker); err != nil {
+			return nil, err
+		}
+	default:
+		// The GUI is provably gone, so the panes went with it and there is nothing to kill. The
+		// record is removed — that is the restart case, and the one recovery that has to keep
+		// working, since a caller cannot kill a pane whose GUI no longer exists.
 	}
 	remaining := make([]LocalWorker, 0, len(workers))
 	for _, entry := range workers {
@@ -821,9 +1056,9 @@ func (b *localBackend) guiID(ctx context.Context) (string, error) {
 	return guiID, nil
 }
 
-// livePaneIDs returns the panes the GUI currently has, keyed by pane id.
-func (b *localBackend) livePaneIDs(ctx context.Context) (map[string]bool, error) {
-	paneIDs, err := b.client.PaneIDs(ctx)
+// livePaneIDs returns the panes the GUI guiID names has, keyed by pane id.
+func (b *localBackend) livePaneIDs(ctx context.Context, guiID string) (map[string]bool, error) {
+	paneIDs, err := b.client.PaneIDs(ctx, guiID)
 	if err != nil {
 		return nil, errors.Wrap(ctx, err, "list wezterm panes failed")
 	}
@@ -834,29 +1069,70 @@ func (b *localBackend) livePaneIDs(ctx context.Context) (map[string]bool, error)
 	return live, nil
 }
 
-// boundSessionID returns the session id the worker's own session bound to the task, or an
-// empty string when it cannot be resolved.
+// killPane closes a worker's pane, treating a pane that died on its own as already closed.
 //
-// ⚠️ AN EMPTY RESULT IS THE ORDINARY CASE AT CREATE TIME AND MUST NOT BE FILLED IN BY GUESSING.
-// The binding is written by the session the tab starts — the work prompt's own task-anchoring
-// step — and the spawn returns as soon as the pane exists, which is before that session has
-// even started. So this is a best-effort read of a value that usually lands a little later,
-// and an unresolvable one is reported empty rather than derived from the tab name, from the
-// task name or from a clock: a session id a caller cannot trust is worse than an absent one,
-// because it resolves to nothing while looking like a handle.
-func (b *localBackend) boundSessionID(ctx context.Context, task TaskName) string {
+// ⚠️ A PANE THAT EXITED BETWEEN THE RECONCILE AND THE KILL IS NOT A FAILURE. wezterm reports
+// the kill of a pane that is no longer there as an error, and returning it would fail a stop
+// whose entire purpose — that pane being gone — has already been met, while leaving the entry
+// in the store for a retry to remove. The pane list is re-read to tell that case from a kill
+// that genuinely failed, where the pane is still there and the error is real.
+//
+// The re-read goes to guiID — the GUI the kill was addressed to — because that is the one whose
+// pane list can answer the question. On the cross-GUI path guiID is the worker's own socket
+// rather than this controller's, and that GUI's list is the only one that says anything about
+// the pane.
+func (b *localBackend) killPane(ctx context.Context, guiID string, worker *LocalWorker) error {
+	if err := b.client.KillPane(ctx, guiID, worker.PaneID); err != nil {
+		still, listErr := b.livePaneIDs(ctx, guiID)
+		if listErr != nil || still[worker.PaneID] {
+			return errors.Wrapf(ctx, err, "kill worker pane %q failed", worker.PaneID)
+		}
+		slog.Warn("worker pane was already gone when the kill failed", "pane", worker.PaneID)
+	}
+	return nil
+}
+
+// taskSessionID returns the session id the task's file currently records, or an empty string
+// when it cannot be resolved. It is what Create records as a worker's CreateSessionID — the
+// value that worker's own binding must differ from — and is never reported as a worker's own
+// session.
+//
+// ⚠️ AN EMPTY RESULT IS THE ORDINARY CASE AND MUST NOT BE FILLED IN BY GUESSING. The binding
+// is written by the session the tab starts — the work prompt's own task-anchoring step — and
+// the spawn returns as soon as the pane exists, which is before that session has even started,
+// so at create time the file usually holds nothing at all. It is read once and synchronously,
+// because one file read is not what the caller is waiting on; what it must not become is the
+// worker's reported session, since anything already in the file belongs to an earlier session
+// of the same task.
+//
+// An unresolvable read is reported empty rather than derived from the tab name, from the task
+// name or from a clock: a session id a caller cannot trust is worse than an absent one, because
+// it resolves to nothing while looking like a handle.
+func (b *localBackend) taskSessionID(ctx context.Context, task TaskName) string {
 	sessionID, err := readTaskSessionID(ctx, b.config.VaultDir, task)
 	if err != nil {
 		// Never fatal: the tab is already open by this point, so failing the create would
 		// orphan it — a live pane no caller was ever told about.
-		slog.Warn("resolve worker session id failed", "task", task, "error", err)
+		slog.Warn("resolve task session id failed", "task", task, "error", err)
 		return ""
 	}
 	return sessionID
 }
 
-// refreshSessionIDs fills in the session id of every worker that does not have one yet, and
+// refreshSessionIDs resolves the session id of every worker from the task file it serves, and
 // reports whether any of them changed.
+//
+// ⚠️ EVERY ENTRY IS RE-READ, INCLUDING THE ONES THAT ALREADY HAVE AN ID, AND A VALUE IS
+// ACCEPTED ONLY WHEN IT DIFFERS FROM THAT ENTRY'S OWN CreateSessionID. Skipping a non-empty
+// entry is exactly what made a stale id permanent: `claude_session_id` is a TASK-scoped
+// frontmatter field, the vault stamps it only when it is empty and leaves it alone on every
+// later binding, so the id a stopped worker's session wrote is still there when the next worker
+// for that same task is created — and nothing rewrites it. Trusting the stored value meant the
+// replacement worker reported the stopped worker's session for its whole life: a handle that
+// looks valid and resolves to a session that ended. Measuring against the create-time snapshot
+// instead accepts a value only when the file has changed since this worker started, which is
+// the only way this worker's own binding can appear, and never accepts the value that was
+// already there when it began.
 //
 // ⚠️ AN UNRESOLVED ID IS LEFT EMPTY, AND THAT IS NOT A GAP TO PAPER OVER. The binding is written
 // by the worker's own session — the work prompt's task-anchoring step — and the supervisor
@@ -872,9 +1148,6 @@ func (b *localBackend) refreshSessionIDs(
 ) ([]LocalWorker, bool) {
 	changed := false
 	for index := range workers {
-		if workers[index].SessionID != "" {
-			continue
-		}
 		sessionID, err := readTaskSessionID(ctx, b.config.VaultDir, workers[index].Task)
 		if err != nil {
 			// Never fatal: the entry's pane is live, so the worker is real whether or not its
@@ -883,7 +1156,10 @@ func (b *localBackend) refreshSessionIDs(
 			slog.Warn("resolve worker session id failed", "task", workers[index].Task, "error", err)
 			continue
 		}
-		if sessionID == "" {
+		if sessionID == "" || sessionID == workers[index].CreateSessionID {
+			continue
+		}
+		if workers[index].SessionID == sessionID {
 			continue
 		}
 		workers[index].SessionID = sessionID
@@ -942,17 +1218,33 @@ func expandHome(path string) string {
 	return filepath.Join(home, strings.TrimPrefix(path, "~"))
 }
 
-// reconcileWorkers returns the workers whose pane is still open, in their stored order.
+// reconcileWorkers returns the entries that should remain in the store, in their stored order.
 //
 // ⚠️ A PANE ID MATCHES ONLY WITHIN ONE GUI INSTANCE. A pane id is a per-mux counter, and the mux
 // is recreated when the GUI restarts, so the ids restart from a low number: an entry recorded
 // before a restart can carry an id that now names an unrelated pane, and matching on the id
 // alone would report a phantom worker and let a stop kill a pane this controller never opened.
-// The recorded GUI id is what makes the two distinguishable, and a mismatch drops the entry.
+// The recorded GUI id is what makes the two distinguishable.
+//
+// ⚠️ AN UNMATCHED GUI IS NOT ON ITS OWN A REASON TO DROP THE ENTRY. Two different things can be
+// wrong with an entry and they must not be treated alike. A pane that is gone is decidable: its
+// GUI is the current one, so the GUI's own pane list is the whole truth about it. A different
+// GUI is not decidable at all — its panes are invisible from here — and this function's answer
+// is what List persists, so dropping on a mismatch would ERASE the record of a worker a second,
+// still-running GUI holds: irreversibly, and leaving a live tab that no stop can reach. The
+// entry is therefore kept unless the GUI it names is provably gone, which is what guiAlive
+// answers — and it answers it both ways round, so a restart's entries go while a second live
+// GUI's stay.
 func reconcileWorkers(workers []LocalWorker, live map[string]bool, guiID string) []LocalWorker {
 	reconciled := make([]LocalWorker, 0, len(workers))
 	for _, worker := range workers {
-		if worker.GuiID == guiID && live[worker.PaneID] {
+		if worker.GuiID == guiID {
+			if live[worker.PaneID] {
+				reconciled = append(reconciled, worker)
+			}
+			continue
+		}
+		if guiAlive(worker.GuiID) {
 			reconciled = append(reconciled, worker)
 		}
 	}

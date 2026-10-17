@@ -1,11 +1,14 @@
 # a2a-worker-controller
 
 Stateless A2A worker controller — `create` / `list` / `stop` over A2A, one isolated worker
-per task, with Docker and k3s backends behind a single backend-agnostic seam.
+per task, with Docker, k3s and local backends behind a single backend-agnostic seam.
 
-The controller **creates** workers and **owns** them by label. It is never in the message
-path between a caller and a worker: `create` returns the worker's own A2A URL, and callers
-talk to that URL directly.
+The controller **creates** workers and **owns** them. A `docker` or `k8s` worker is owned by
+its labels; a `local` worker is recorded in a JSON store reconciled against the live WezTerm
+panes. For a container or pod backend the controller is never in the message path between a
+caller and a worker — `create` returns the worker's own A2A URL and callers talk to that URL
+directly. A `local` worker is a WezTerm tab with no endpoint at all, so `create` returns an
+empty `a2a_url` and the pane id is the handle instead.
 
 ## Install
 
@@ -51,6 +54,11 @@ child's `PATH` cannot repair it. The default is `/Applications/WezTerm.app/Conte
 `WORKER_IMAGE` is **required and has no default on purpose** — an untagged reference such as
 `bborbe/agent-claude` resolves to `:latest`, which need not exist, and the failure surfaces
 only later as a `docker run` exit 125.
+
+⚠️ **It is required regardless of the backend selected** (`main.go` marks it `required:"true"`,
+not "required for docker"), so a `-backend=local` controller — which never runs a container —
+must still be given a worker image. Pass a meaningless one; the process refuses to start
+without it.
 
 ### The workers' model route
 
@@ -122,11 +130,20 @@ The control reply is at `result.task.artifacts[0].parts[0].data`. A `worker` is
 ⚠️ **`pane_id` and `session_id` exist for workers that have no URL.** A `local` worker is a
 WezTerm tab: it serves no A2A endpoint, so `a2a_url` is **empty**, the token `create` returns
 is **empty**, and the pane id is the only handle a caller has on it — it is what a supervisor
-messages through, while `stop` takes the `worker_id` (see the table above). `session_id` is the
-Claude Code session the tab bound to the task; it is empty until that session has bound itself,
-which happens after `create` returns, so a caller that needs it reads `list` — which re-reads
-each task file and reports the id once the binding has landed — rather than treating the empty
-value as a failure. For a `docker` or `k8s` worker both fields are empty and `a2a_url` is set.
+messages through, while `stop` takes the `worker_id` (see the table above). For a `docker` or
+`k8s` worker both fields are empty and `a2a_url` is set.
+
+`session_id` is the Claude Code session the worker's tab bound to the task. **`create` returns
+it empty**, and that is by construction rather than a failure: the binding is written by the
+session the tab starts, which happens after `create` has returned. `create` reads the task's
+`claude_session_id` once and records it as the baseline the worker's own binding must differ
+from; `list` re-reads each task file and reports the id once the file holds a value that is not
+that baseline. ⚠️ The create-time read is **synchronous, not deferred to `list`** — one file
+read is not what a caller is waiting on. ⚠️ A value already in the task file when the worker was
+created belongs to an **earlier** session and is never reported as this worker's:
+`claude_session_id` is a task-scoped field the vault stamps only when it is empty and leaves
+alone on every later binding, so after the backend's own "stop that worker and create another"
+recovery the file still names the stopped worker's session.
 
 ⚠️ **A `create` for a task that already has a worker is REFUSED, and the refusal is not a
 transport failure.** Only one worker is ever started per task, and that worker's token cannot
@@ -142,13 +159,13 @@ asked for. ⚠️ Do **not** retry `create` unchanged on this failure: it fails 
 forever while the worker it names is left running.
 
 **The schema is `pkg/types.go`** — the single definition of the API, shared by the Docker
-backend, the k3s sibling, and the supervisor's `spawn_agent` target. Nothing above
-`pkg/backend-provider.go` may name a backend.
+backend, the k3s sibling, the local backend, and the supervisor's `spawn_agent` target.
+Nothing above `pkg/backend-provider.go` may name a backend.
 
-## Ownership and labels
+## Ownership
 
-Every worker container carries exactly three labels, and ownership is read from them — never
-from memory, so `list` is correct after any restart:
+A `docker` or `k8s` worker carries exactly three labels, and ownership is read from them —
+never from memory, so `list` is correct after any restart:
 
 | Label | Value |
 |---|---|
@@ -158,6 +175,20 @@ from memory, so `list` is correct after any restart:
 
 A container without the marker label is never listed and never stopped. No credential is ever
 written to a label.
+
+⚠️ **A `local` worker carries no labels at all, because a WezTerm pane cannot.** Ownership for
+the `local` backend lives in a JSON store (`-local-state-file`) holding each worker's
+`worker_id`, `task`, `pane_id`, the WezTerm GUI instance the pane belongs to, and its session
+id. The store is the record and the live panes are the truth: every `create`, `list` and `stop`
+reconciles the two, so a pane killed by hand stops being a worker without anything having to be
+told. An entry belonging to a GUI that is not the current one is **kept** — a second,
+still-running WezTerm must not cost the first one its records — and left out of `list`'s reply,
+since this controller cannot see that GUI's panes. It is erased only once that GUI is provably
+gone, which is its socket being off disk **or** the pid in its name being dead, so a GUI that
+died uncleanly cannot leave a record behind that blocks `create` for its task. `stop` on such a
+worker closes its pane through **that** GUI's own socket rather than untracking it. The state
+file is single-writer: `save` replaces it wholesale, so one file belongs to exactly one
+controller.
 
 ## Development
 

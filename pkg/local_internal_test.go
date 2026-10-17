@@ -14,11 +14,23 @@ package pkg
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
+
+// deadPID is a pid no process holds, so a socket named for it reads as a dead GUI. It is far
+// above macOS's own pid limit, so the probe is refused rather than delivered to a stranger.
+//
+// It is repeated in the external test file rather than shared, because that file is a separate
+// package and repeating a fixture is what makes a rename here a failure there rather than a
+// silent follow.
+const deadPID = "4194304"
 
 var _ = Describe("local backend internals", func() {
 	Describe("spawnArgs", func() {
@@ -121,6 +133,18 @@ var _ = Describe("local backend internals", func() {
 
 			Expect(err).NotTo(BeNil())
 		})
+
+		// ⚠️ LOUDLY, BECAUSE THE ALTERNATIVE IS SILENT AND DESTRUCTIVE. Reading an absent field as
+		// the number 0 yields a pane list that does not contain any real pane, and List reads "no
+		// matching pane" as "dead" — so a wezterm that renamed this field would erase every
+		// stored worker rather than failing. An empty array is still fine: a GUI with no panes
+		// really has none.
+		It("fails when an entry carries no pane_id, rather than reading it as zero", func() {
+			_, err := parsePaneIDs(context.Background(), `[{"window_id":1}]`)
+
+			Expect(err).NotTo(BeNil())
+			Expect(err.Error()).To(ContainSubstring("pane_id"))
+		})
 	})
 
 	Describe("shellQuote", func() {
@@ -186,6 +210,27 @@ var _ = Describe("local backend internals", func() {
 				Expect(validateTaskName(context.Background(), name)).NotTo(BeNil())
 			}
 		})
+
+		// ⚠️ THE DOUBLE QUOTE IS REFUSED BECAUSE OF THE WORK PROMPT, WHICH IS NOT A SHELL BUT
+		// STILL HAS QUOTING. workPrompt renders the name between double quotes, so `a"b` produces
+		// `/vault-cli:work-on-task "a"b"` — a prompt whose quoting no longer says what it means.
+		It("refuses a name carrying a double quote", func() {
+			Expect(validateTaskName(context.Background(), `a"b`)).NotTo(BeNil())
+			Expect(validateTaskName(context.Background(), `"`)).NotTo(BeNil())
+		})
+
+		// A control character is refused for the prompt and for the tab bar: a newline in a tab
+		// name splits the tab bar entry rather than being shown in it.
+		It("refuses a name carrying a control character", func() {
+			Expect(validateTaskName(context.Background(), "a\nb")).NotTo(BeNil())
+			Expect(validateTaskName(context.Background(), "a\tb")).NotTo(BeNil())
+		})
+
+		// The quoting story is otherwise complete, so the ordinary punctuation a task name really
+		// carries must keep working — an apostrophe is prompt text and never reaches a shell.
+		It("accepts an apostrophe, a colon and a dash", func() {
+			Expect(validateTaskName(context.Background(), "don't-break: it's fine")).To(BeNil())
+		})
 	})
 
 	Describe("reconcileWorkers", func() {
@@ -203,11 +248,141 @@ var _ = Describe("local backend internals", func() {
 		})
 
 		// ⚠️ THE NEW GUI REUSES THE PANE ID AND THE ENTRY MUST STILL GO: that id now names a pane
-		// this controller never opened, so reporting it would be a phantom worker.
-		It("drops a worker whose pane id is live but belongs to a different GUI", func() {
-			workers := []LocalWorker{{WorkerID: "w1", PaneID: "1", GuiID: "gui-a"}}
+		// this controller never opened, so reporting it would be a phantom worker. It goes
+		// because the GUI it was recorded under is PROVABLY gone — its socket is not on disk.
+		It("drops a worker whose GUI socket is gone and whose pane id is live again", func() {
+			workers := []LocalWorker{{
+				WorkerID: "w1",
+				PaneID:   "1",
+				GuiID:    filepath.Join(GinkgoT().TempDir(), "gui-sock-1000"),
+			}}
 
 			Expect(reconcileWorkers(workers, map[string]bool{"1": true}, "gui-b")).To(BeEmpty())
+		})
+
+		// ⚠️ A SECOND GUI RUNNING ALONGSIDE MUST NOT COST THE FIRST ONE ITS RECORD. The pane is
+		// invisible from here, so nothing says the worker is dead — and this function's answer is
+		// what List persists, so dropping it would erase the only record naming a live pane. Its
+		// socket being on disk AND its pid being alive is what says that GUI is still there.
+		It("keeps a worker whose GUI is still running", func() {
+			socket := filepath.Join(GinkgoT().TempDir(), "gui-sock-"+strconv.Itoa(os.Getpid()))
+			Expect(os.WriteFile(socket, nil, 0o600)).To(BeNil())
+			workers := []LocalWorker{{WorkerID: "w1", PaneID: "1", GuiID: socket}}
+
+			Expect(reconcileWorkers(workers, map[string]bool{"1": true}, "gui-b")).
+				To(Equal(workers))
+		})
+
+		// ⚠️ THE SOCKET FILE ALONE IS NOT ENOUGH, AND THIS IS THE CASE THAT PROVES IT. A GUI that
+		// died uncleanly leaves its socket on disk; treating that as "still running" would keep
+		// its entries alive forever — out of every list reply, and still refusing create for
+		// their tasks. The dead pid in the socket's own name is the fact that closes that.
+		It("drops a worker whose GUI socket was left behind by a dead process", func() {
+			socket := filepath.Join(GinkgoT().TempDir(), "gui-sock-"+deadPID)
+			Expect(os.WriteFile(socket, nil, 0o600)).To(BeNil())
+			workers := []LocalWorker{{WorkerID: "w1", PaneID: "1", GuiID: socket}}
+
+			Expect(reconcileWorkers(workers, map[string]bool{"1": true}, "gui-b")).To(BeEmpty())
+		})
+
+		It("drops a worker recorded with no GUI identity at all", func() {
+			workers := []LocalWorker{{WorkerID: "w1", PaneID: "1"}}
+
+			Expect(reconcileWorkers(workers, map[string]bool{"1": true}, "gui-b")).To(BeEmpty())
+		})
+	})
+
+	Describe("guiAlive", func() {
+		// Both halves are asserted separately, because either one alone is a wrong answer:
+		// existence alone keeps a dead GUI's records, and liveness alone cannot be read from a
+		// socket that is gone.
+		It("reports a GUI whose socket is on disk and whose pid is alive", func() {
+			socket := filepath.Join(GinkgoT().TempDir(), "gui-sock-"+strconv.Itoa(os.Getpid()))
+			Expect(os.WriteFile(socket, nil, 0o600)).To(BeNil())
+
+			Expect(guiAlive(socket)).To(BeTrue())
+		})
+
+		It("reports a GUI whose socket was left behind by a dead process as gone", func() {
+			socket := filepath.Join(GinkgoT().TempDir(), "gui-sock-"+deadPID)
+			Expect(os.WriteFile(socket, nil, 0o600)).To(BeNil())
+
+			Expect(guiAlive(socket)).To(BeFalse())
+		})
+
+		It("reports a GUI with no socket as gone, whatever its pid", func() {
+			Expect(guiAlive(
+				filepath.Join(GinkgoT().TempDir(), "gui-sock-"+strconv.Itoa(os.Getpid())),
+			)).To(BeFalse())
+		})
+
+		It("reports a path that names no GUI socket as gone", func() {
+			Expect(guiAlive("")).To(BeFalse())
+			Expect(guiAlive(GinkgoT().TempDir())).To(BeFalse())
+			Expect(guiAlive(filepath.Join(GinkgoT().TempDir(), "sock"))).To(BeFalse())
+		})
+	})
+
+	Describe("liveGuiSocket", func() {
+		// ⚠️ THE DIRECTORY IS A PARAMETER SO THIS RULE IS TESTABLE WITHOUT A RUNNING GUI. The
+		// selection is load-bearing — it decides which GUI every call talks to — and it is the
+		// one part of the backend that a fake client cannot stand in for, because the fake is
+		// the thing being replaced.
+		It("picks the live socket and ignores one whose process is gone", func() {
+			dir := GinkgoT().TempDir()
+			live := filepath.Join(dir, "gui-sock-"+strconv.Itoa(os.Getpid()))
+			dead := filepath.Join(dir, "gui-sock-4194304")
+			Expect(os.WriteFile(live, nil, 0o600)).To(BeNil())
+			Expect(os.WriteFile(dead, nil, 0o600)).To(BeNil())
+			// The dead one is the NEWER file, so a selection that ignored liveness would pick it.
+			Expect(os.Chtimes(live, time.Unix(0, 0), time.Unix(0, 0))).To(BeNil())
+
+			socket, err := liveGuiSocket(context.Background(), dir)
+
+			Expect(err).To(BeNil())
+			Expect(socket).To(Equal(live))
+		})
+
+		It("ignores files that are not per-GUI sockets", func() {
+			dir := GinkgoT().TempDir()
+			Expect(os.WriteFile(filepath.Join(dir, "sock"), nil, 0o600)).To(BeNil())
+			Expect(os.WriteFile(filepath.Join(dir, "gui-sock-abc"), nil, 0o600)).To(BeNil())
+
+			_, err := liveGuiSocket(context.Background(), dir)
+
+			Expect(err).NotTo(BeNil())
+		})
+
+		It("fails rather than falling back when no live socket exists", func() {
+			_, err := liveGuiSocket(context.Background(), GinkgoT().TempDir())
+
+			Expect(err).NotTo(BeNil())
+		})
+
+		It("fails when the directory cannot be read", func() {
+			_, err := liveGuiSocket(
+				context.Background(),
+				filepath.Join(GinkgoT().TempDir(), "absent"),
+			)
+
+			Expect(err).NotTo(BeNil())
+		})
+	})
+
+	Describe("processAlive", func() {
+		It("reads this process's own pid as alive", func() {
+			Expect(processAlive(strconv.Itoa(os.Getpid()))).To(BeTrue())
+		})
+
+		It("reads an unused pid as dead", func() {
+			Expect(processAlive("4194304")).To(BeFalse())
+		})
+
+		It("reads a value that is not a pid as dead", func() {
+			Expect(processAlive("")).To(BeFalse())
+			Expect(processAlive("abc")).To(BeFalse())
+			Expect(processAlive("0")).To(BeFalse())
+			Expect(processAlive("-1")).To(BeFalse())
 		})
 	})
 
