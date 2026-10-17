@@ -57,12 +57,13 @@ type PkgWorkerResourceBuilder struct {
 	buildNetworkPolicyReturnsOnCall map[int]struct {
 		result1 *v1a.NetworkPolicy
 	}
-	BuildSecretStub        func(v1.Config, v1b.Secret, string) *v1b.Secret
+	BuildSecretStub        func(v1.Config, v1b.Secret, string, []pkg.ResolvedSecret) *v1b.Secret
 	buildSecretMutex       sync.RWMutex
 	buildSecretArgsForCall []struct {
 		arg1 v1.Config
 		arg2 v1b.Secret
 		arg3 string
+		arg4 []pkg.ResolvedSecret
 	}
 	buildSecretReturns struct {
 		result1 *v1b.Secret
@@ -331,20 +332,26 @@ func (fake *PkgWorkerResourceBuilder) BuildNetworkPolicyReturnsOnCall(i int, res
 	}{result1}
 }
 
-func (fake *PkgWorkerResourceBuilder) BuildSecret(arg1 v1.Config, arg2 v1b.Secret, arg3 string) *v1b.Secret {
+func (fake *PkgWorkerResourceBuilder) BuildSecret(arg1 v1.Config, arg2 v1b.Secret, arg3 string, arg4 []pkg.ResolvedSecret) *v1b.Secret {
+	var arg4Copy []pkg.ResolvedSecret
+	if arg4 != nil {
+		arg4Copy = make([]pkg.ResolvedSecret, len(arg4))
+		copy(arg4Copy, arg4)
+	}
 	fake.buildSecretMutex.Lock()
 	ret, specificReturn := fake.buildSecretReturnsOnCall[len(fake.buildSecretArgsForCall)]
 	fake.buildSecretArgsForCall = append(fake.buildSecretArgsForCall, struct {
 		arg1 v1.Config
 		arg2 v1b.Secret
 		arg3 string
-	}{arg1, arg2, arg3})
+		arg4 []pkg.ResolvedSecret
+	}{arg1, arg2, arg3, arg4Copy})
 	stub := fake.BuildSecretStub
 	fakeReturns := fake.buildSecretReturns
-	fake.recordInvocation("BuildSecret", []interface{}{arg1, arg2, arg3})
+	fake.recordInvocation("BuildSecret", []interface{}{arg1, arg2, arg3, arg4Copy})
 	fake.buildSecretMutex.Unlock()
 	if stub != nil {
-		return stub(arg1, arg2, arg3)
+		return stub(arg1, arg2, arg3, arg4)
 	}
 	if specificReturn {
 		return ret.result1
@@ -358,17 +365,17 @@ func (fake *PkgWorkerResourceBuilder) BuildSecretCallCount() int {
 	return len(fake.buildSecretArgsForCall)
 }
 
-func (fake *PkgWorkerResourceBuilder) BuildSecretCalls(stub func(v1.Config, v1b.Secret, string) *v1b.Secret) {
+func (fake *PkgWorkerResourceBuilder) BuildSecretCalls(stub func(v1.Config, v1b.Secret, string, []pkg.ResolvedSecret) *v1b.Secret) {
 	fake.buildSecretMutex.Lock()
 	defer fake.buildSecretMutex.Unlock()
 	fake.BuildSecretStub = stub
 }
 
-func (fake *PkgWorkerResourceBuilder) BuildSecretArgsForCall(i int) (v1.Config, v1b.Secret, string) {
+func (fake *PkgWorkerResourceBuilder) BuildSecretArgsForCall(i int) (v1.Config, v1b.Secret, string, []pkg.ResolvedSecret) {
 	fake.buildSecretMutex.RLock()
 	defer fake.buildSecretMutex.RUnlock()
 	argsForCall := fake.buildSecretArgsForCall[i]
-	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3
+	return argsForCall.arg1, argsForCall.arg2, argsForCall.arg3, argsForCall.arg4
 }
 
 func (fake *PkgWorkerResourceBuilder) BuildSecretReturns(result1 *v1b.Secret) {

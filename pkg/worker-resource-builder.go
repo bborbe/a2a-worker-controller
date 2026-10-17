@@ -43,8 +43,13 @@ type WorkerResourceBuilder interface {
 	// BuildConfig clones template into the Config for one worker serving task.
 	BuildConfig(template agentv1.Config, workerID WorkerID, task TaskName) *agentv1.Config
 	// BuildSecret renders the worker's credential Secret, owned by owner: every key of
-	// template, with the bearer replaced by token.
-	BuildSecret(owner agentv1.Config, template corev1.Secret, token string) *corev1.Secret
+	// template, with the bearer replaced by token, plus one entry per declared secret.
+	BuildSecret(
+		owner agentv1.Config,
+		template corev1.Secret,
+		token string,
+		secrets []ResolvedSecret,
+	) *corev1.Secret
 	// BuildService renders the ClusterIP Service in front of owner's pod.
 	BuildService(owner agentv1.Config) *corev1.Service
 	// BuildIngress renders the TLS Ingress that exposes owner's Service on its own host.
@@ -128,12 +133,22 @@ func (b *workerResourceBuilder) BuildSecret(
 	owner agentv1.Config,
 	template corev1.Secret,
 	token string,
+	secrets []ResolvedSecret,
 ) *corev1.Secret {
-	data := make(map[string][]byte, len(template.Data)+1)
+	data := make(map[string][]byte, len(template.Data)+1+len(secrets))
 	for key, value := range template.Data {
 		data[key] = value
 	}
 	data[tokenEnvName] = []byte(token)
+	// ⚠️ THE DECLARED SECRETS RIDE THIS SECRET RATHER THAN THE CONFIG'S spec.Env, and that is
+	// forced by the CRD rather than chosen. `spec.Env` is a literal `map[string]string`
+	// (agent-task-executor's k8s/apis/agent.benjamin-borbe.de/v1/types.go), so a value written
+	// there is a literal in the Config object — readable by anything that can read a Config, and
+	// durable in etcd. Here the value lives in a Secret, and the pod reaches it through the
+	// envFrom the template already declares, so the Config carries the key and never the value.
+	for _, secret := range secrets {
+		data[secret.Name] = []byte(secret.Value)
+	}
 	return &corev1.Secret{
 		ObjectMeta: b.childMeta(owner),
 		Type:       corev1.SecretTypeOpaque,

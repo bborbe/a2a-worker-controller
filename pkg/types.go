@@ -86,6 +86,44 @@ type ControlRequest struct {
 	Stop *StopRequest `json:"stop,omitempty"`
 }
 
+// Mount is one filesystem path a caller asks the controller to make reachable inside the
+// worker. It is DECLARED rather than passed through as a raw docker `-v` argument, because a
+// raw argument would let a caller mount any path on the host and create is a public surface.
+//
+// ⚠️ `Volume` EXISTS ONLY TO BE REFUSED, and that is deliberate rather than vestigial. A
+// named docker volume is not a host path, so the allowlist below cannot govern it: a caller
+// free to name one could mount another workload's data volume. Refusing it by name — rather
+// than by omitting the field — is what turns a silently-ignored key into an error that names
+// the thing the caller asked for. Go's decoder drops unknown keys, so an omitted field would
+// have accepted `{"volume": "…"}` and mounted nothing, which reads as success.
+type Mount struct {
+	// HostPath is the absolute host path to expose. It must fall inside the controller's
+	// configured allowlist, or the create is refused.
+	HostPath string `json:"host_path,omitempty"`
+	// Volume is a named docker volume. Refused, always, in this revision.
+	Volume string `json:"volume,omitempty"`
+	// ContainerPath is where the path appears inside the worker. Required.
+	ContainerPath string `json:"container_path"`
+	// ReadOnly asks for the mount to be read-only. Defaults to false, so a caller that wants
+	// a read-only mount must say so.
+	ReadOnly bool `json:"read_only,omitempty"`
+}
+
+// Secret is one credential a caller asks the controller to resolve and deliver to the worker.
+//
+// ⚠️ THE VALUE NEVER TRAVELS IN THE REQUEST. The caller names a TeamVault key; the controller
+// resolves it with its own credential and hands the worker the resolved value through a
+// channel the request and the container's spec both stay clear of. That is the whole point of
+// the shape: a caller that could send the value could also log it, and create is a public
+// surface whose requests are recorded.
+type Secret struct {
+	// Name is the key the worker reads the secret under. Required.
+	Name string `json:"name"`
+	// TeamVaultKey is the TeamVault lookup key the controller resolves. A short identifier
+	// rather than a secret, which is what makes naming it here safe.
+	TeamVaultKey string `json:"teamvault_key"`
+}
+
 // CreateRequest asks for a worker serving one task.
 type CreateRequest struct {
 	Task TaskName `json:"task"`
@@ -99,6 +137,12 @@ type CreateRequest struct {
 	// than merged: silently overriding AGENT_TYPE would start a worker outside the gated
 	// service path, which is the setting its permission gate depends on.
 	Env map[string]string `json:"env,omitempty"`
+	// Mounts are the host paths the caller asks the controller to make reachable. Each is
+	// checked against the controller's allowlist before any container is created.
+	Mounts []Mount `json:"mounts,omitempty"`
+	// Secrets are the credentials the caller asks the controller to resolve and deliver.
+	// Only the TeamVault KEY travels here; the value is resolved controller-side.
+	Secrets []Secret `json:"secrets,omitempty"`
 }
 
 // CreateResponse is the reply to a create. It is the only place a worker's token is ever

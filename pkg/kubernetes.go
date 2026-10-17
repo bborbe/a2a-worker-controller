@@ -49,6 +49,10 @@ type KubernetesConfig struct {
 	// EgressAllow lists the in-cluster destinations each worker's NetworkPolicy allows, on top
 	// of DNS. Everything else — the public internet included — is denied.
 	EgressAllow []EgressDestination
+	// TeamVault resolves a declared secret's key to its value. A nil resolver refuses any
+	// create that declares a secret, rather than writing a Config whose pod would start
+	// without the credential it was told to expect.
+	TeamVault TeamVaultResolver
 }
 
 // DefaultKubernetesConfig is the k8s backend's configuration before the deployment-specific
@@ -58,6 +62,7 @@ func DefaultKubernetesConfig() KubernetesConfig {
 		TemplateConfig:   DefaultKubernetesTemplateConfig,
 		AgentNameBase:    DefaultAgentNameBase,
 		IngressClassName: DefaultKubernetesIngressClassName,
+		TeamVault:        NewTeamVaultResolver(),
 	}
 }
 
@@ -102,6 +107,11 @@ type kubernetesBackend struct {
 	client         KubernetesClient
 	builder        WorkerResourceBuilder
 	templateConfig string
+	// teamVault resolves a declared secret's key to its value. It is held here rather than read
+	// off the builder's config because the builder renders objects and never talks outward: a
+	// resolver on it would put a network call behind a type whose whole contract is that every
+	// method is a pure function of its arguments.
+	teamVault TeamVaultResolver
 	// mutex serializes Create, because its dedup read happens before the writes that act on
 	// it, so two overlapping creates for one task could otherwise start two workers. It closes
 	// that race within this process only.
@@ -119,8 +129,14 @@ func NewKubernetesBackend(
 	client KubernetesClient,
 	builder WorkerResourceBuilder,
 	templateConfig string,
+	teamVault TeamVaultResolver,
 ) WorkerBackend {
-	return &kubernetesBackend{client: client, builder: builder, templateConfig: templateConfig}
+	return &kubernetesBackend{
+		client:         client,
+		builder:        builder,
+		templateConfig: templateConfig,
+		teamVault:      teamVault,
+	}
 }
 
 // Create starts one worker pod for the requested task and returns it with its own freshly
@@ -152,6 +168,11 @@ func (b *kubernetesBackend) Create(
 			req.Task,
 			b.workerFor(*existing).WorkerID,
 		)
+	}
+
+	resolved, err := b.resolveDeclaredSecrets(ctx, req)
+	if err != nil {
+		return nil, err
 	}
 
 	template, err := b.client.GetConfig(ctx, b.templateConfig)
@@ -195,7 +216,7 @@ func (b *kubernetesBackend) Create(
 		return nil, errors.Wrap(ctx, err, "create worker config failed")
 	}
 
-	if err := b.createChildren(ctx, *created, *templateSecret, token); err != nil {
+	if err := b.createChildren(ctx, *created, *templateSecret, token, resolved); err != nil {
 		// Deleting the Config garbage-collects whatever children were already written, so a
 		// failed create leaves nothing behind for list to report.
 		if deleteErr := b.client.DeleteConfig(ctx, created.Name); deleteErr != nil {
@@ -213,6 +234,33 @@ func (b *kubernetesBackend) Create(
 	return &CreateResponse{Worker: b.workerFor(*created), Token: token}, nil
 }
 
+// resolveDeclaredSecrets settles everything a create can be refused for before any cluster
+// object is written, and returns the values the worker's Secret will carry.
+//
+// ⚠️ A DECLARED MOUNT IS REFUSED ON THIS BACKEND RATHER THAN IGNORED. k8s worker mounts are out of
+// scope for this change, and a create that accepted the field and dropped it would hand back a
+// worker the caller believes can reach its vault — the same silent failure the docker path
+// refuses at, only discovered later and further from its cause.
+//
+// Resolution happens here rather than after the Config is written, so a TeamVault outage leaves
+// the cluster untouched instead of a Config whose owner has no Secret behind it.
+func (b *kubernetesBackend) resolveDeclaredSecrets(
+	ctx context.Context,
+	req CreateRequest,
+) ([]ResolvedSecret, error) {
+	if len(req.Mounts) > 0 {
+		return nil, errors.Errorf(
+			ctx,
+			"the k8s backend does not support declared mounts; %d were requested",
+			len(req.Mounts),
+		)
+	}
+	if err := ValidateSecrets(ctx, req.Secrets); err != nil {
+		return nil, err
+	}
+	return resolveSecrets(ctx, b.teamVault, req.Secrets)
+}
+
 // createChildren writes the worker's NetworkPolicy, token Secret, Service and Ingress, each
 // owned by owner.
 //
@@ -224,11 +272,15 @@ func (b *kubernetesBackend) createChildren(
 	owner agentv1.Config,
 	templateSecret corev1.Secret,
 	token string,
+	secrets []ResolvedSecret,
 ) error {
 	if err := b.client.CreateNetworkPolicy(ctx, b.builder.BuildNetworkPolicy(owner)); err != nil {
 		return errors.Wrap(ctx, err, "create worker network policy failed")
 	}
-	if err := b.client.CreateSecret(ctx, b.builder.BuildSecret(owner, templateSecret, token)); err != nil {
+	if err := b.client.CreateSecret(
+		ctx,
+		b.builder.BuildSecret(owner, templateSecret, token, secrets),
+	); err != nil {
 		return errors.Wrap(ctx, err, "create worker secret failed")
 	}
 	if err := b.client.CreateService(ctx, b.builder.BuildService(owner)); err != nil {
