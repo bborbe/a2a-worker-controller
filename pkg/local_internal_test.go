@@ -125,15 +125,27 @@ var _ = Describe("local backend internals", func() {
 			Expect(ids).To(Equal([]string{"3", "17"}))
 		})
 
-		// ⚠️ THIS IS THE FIX, AND IT IS THE SPEC THAT WOULD HAVE CAUGHT v0.12.2's DEFECT. The
-		// operator's `wezterm.lua` sets `exit_behavior = "Hold"`, so a pane whose command exits
-		// stays OPEN — a launcher that dies at once leaves a pane that still exists, and a check
-		// on pane existence alone then reports it as a healthy worker. Measured 2026-10-18: a stub
-		// exiting 127 left `cwd: ""` while every live worker pane carried its working directory.
-		// A pane whose process is gone has no working directory, so it is dropped here rather than
-		// counted as alive — which is what makes `create` fail and `list` stop reporting it.
-		It("drops a pane whose process is gone, rather than counting it as live", func() {
+		// ⚠️ THE TWO LISTS ANSWER DIFFERENT QUESTIONS AND THESE SPECS PIN THE DIFFERENCE. A pane
+		// whose launcher died is HELD: it still exists — so parsePaneIDs keeps it, and `Stop` can
+		// still close it — but it has no process, so parseLivePaneIDs drops it and the create
+		// guard fails. Collapsing the two is what made the first cut of this fix leak tabs, so a
+		// spec that only exercises one of them is not enough.
+		It("keeps a held pane in the existence list, so it can still be closed", func() {
 			ids, err := parsePaneIDs(
+				context.Background(),
+				`[{"pane_id":3,"cwd":"file:///vault"},{"pane_id":17,"cwd":""}]`,
+			)
+
+			Expect(err).To(BeNil())
+			Expect(ids).To(Equal([]string{"3", "17"}))
+		})
+
+		// ⚠️ THIS IS THE SPEC THAT WOULD HAVE CAUGHT v0.12.2's DEFECT. `exit_behavior = "Hold"`
+		// keeps a dead launcher's pane OPEN, so a check on pane existence alone reports it as a
+		// healthy worker — measured 2026-10-18, a stub exiting 127 left `cwd: ""` and the guard
+		// passed the create.
+		It("drops a held pane from the liveness list, so the guard fails the create", func() {
+			ids, err := parseLivePaneIDs(
 				context.Background(),
 				`[{"pane_id":3,"cwd":"file:///vault"},{"pane_id":17,"cwd":""}]`,
 			)
@@ -142,15 +154,17 @@ var _ = Describe("local backend internals", func() {
 			Expect(ids).To(Equal([]string{"3"}))
 		})
 
-		// ⚠️ SAME REASONING AS THE pane_id CASE BELOW, AND THE STAKES ARE THE SAME. Reading an
-		// absent cwd as empty would mark every worker dead the moment wezterm renamed the field —
-		// the destructive direction — so an absent field has to fail the call instead.
-		It("fails when an entry carries no cwd, rather than reading it as empty", func() {
-			_, err := parsePaneIDs(context.Background(), `[{"pane_id":3}]`)
+		// ⚠️ ABSENT IS NOT EMPTY, AND THE DESTRUCTIVE DIRECTION IS THE ONE TO FAIL ON. Reading an
+		// absent cwd as empty would mark every worker dead the moment wezterm renamed the field.
+		It(
+			"fails the liveness read when an entry carries no cwd, rather than reading it as empty",
+			func() {
+				_, err := parseLivePaneIDs(context.Background(), `[{"pane_id":3}]`)
 
-			Expect(err).NotTo(BeNil())
-			Expect(err.Error()).To(ContainSubstring("cwd"))
-		})
+				Expect(err).NotTo(BeNil())
+				Expect(err.Error()).To(ContainSubstring("cwd"))
+			},
+		)
 
 		It("returns an empty list for a gui with no panes", func() {
 			ids, err := parsePaneIDs(context.Background(), `[]`)

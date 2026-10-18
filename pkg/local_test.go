@@ -143,11 +143,8 @@ type fakeWeztermClient struct {
 	// on the other side of a spawn: the tab's session starts and writes its binding into the
 	// task file, which is the event a baseline read placed after the spawn would swallow.
 	onSpawn func()
-	// paneDeathAfter models a launcher that dies on its own after opening its pane: once this much
-	// time has passed since the spawn, the pane list answers empty. Zero leaves the pane in place
-	// for the whole spec, which is the ordinary case. It is what lets a spec drive the guard from
-	// both sides — a death landing before the first read, and one landing mid-wait — without a
-	// real launcher and without waiting out the shipped floor.
+	// paneDeathAfter models a launcher that dies on its own: past this delay since the spawn the
+	// pane is HELD — it still exists, but LivePaneIDs drops it. Zero leaves it live throughout.
 	paneDeathAfter time.Duration
 	// spawnedAt is when Spawn last answered; paneDeathAfter is measured from it.
 	spawnedAt time.Time
@@ -184,9 +181,21 @@ func (f *fakeWeztermClient) PaneIDs(_ context.Context, _ string) ([]string, erro
 	if f.killFailed && f.panesAfterFailedKill != nil {
 		return f.panesAfterFailedKill, nil
 	}
-	// A launcher that died takes its pane with it, so the list is empty from its death onwards.
-	// Measured from the spawn rather than from the first read, so the death lands wherever the
-	// spec put it — before the guard's first look, or partway through its wait.
+	// ⚠️ A PANE WHOSE LAUNCHER DIED IS STILL LISTED HERE, AND THAT IS THE POINT: `Stop` reads
+	// this list to decide whether to kill, so a held pane must appear or the tab is leaked.
+	return f.panes, nil
+}
+
+// LivePaneIDs models the LIVENESS question, deliberately NOT the same list as PaneIDs: a pane
+// whose launcher died is HELD, not gone — real wezterm keeps it open, so it exists and is
+// closable but has no process. Modelling that death as VANISHING is what let v0.12.2 pass.
+func (f *fakeWeztermClient) LivePaneIDs(_ context.Context, _ string) ([]string, error) {
+	if f.paneErr != nil {
+		return nil, f.paneErr
+	}
+	if f.paneErrAfterSpawn != nil && !f.spawnedAt.IsZero() {
+		return nil, f.paneErrAfterSpawn
+	}
 	if f.paneDeathAfter > 0 && !f.spawnedAt.IsZero() &&
 		time.Since(f.spawnedAt) >= f.paneDeathAfter {
 		return nil, nil
@@ -392,11 +401,8 @@ var _ = Describe("LocalBackend", func() {
 			Expect(client.spawns).To(HaveLen(1))
 		})
 
-		// ⚠️ THESE ARE THE SPECS THAT MUST FAIL WITHOUT THE GUARD, AND THEY ARE WRITTEN THAT WAY.
-		// Each drives a launcher that dies on its own — the one shape the spawn reply cannot
-		// report, because `wezterm cli spawn` answers with a pane id and succeeds either way.
-		// With the liveness wait reverted, create answers with a running worker for a pane that
-		// is already gone and every assertion below fails.
+		// ⚠️ THESE MUST FAIL WITHOUT THE GUARD. Each drives a launcher that dies on its own — the
+		// one shape the spawn reply cannot report — so with the wait reverted every one fails.
 		Describe("a launcher that exits before its worker starts", func() {
 			It("fails the create rather than reporting a running worker", func() {
 				// Dies before the guard's first look: the launcher that never started at all — a
@@ -429,15 +435,10 @@ var _ = Describe("LocalBackend", func() {
 			})
 
 			It("catches a launcher that dies partway through the wait, not only at once", func() {
-				// Dies well after the spawn but inside the floor. This is the case a single
-				// immediate read passes: the pane is still there on the first look, so only a wait
-				// that re-reads past it can tell this from a healthy worker.
+				// Dies inside the floor, so a single immediate read would pass it.
 				//
-				// ⚠️ HALF THE FLOOR, NOT THREE QUARTERS. The death has to land on a tick, and the
-				// ticks are floor/10 apart, so a death at 3/4 leaves only a 10 ms window: a
-				// scheduling delay under load would let the deadline fire first, the guard would
-				// answer nil, and the spec would fail intermittently on a correct implementation.
-				// Half the floor leaves the death 20 ms clear of the deadline.
+				// ⚠️ HALF THE FLOOR, NOT THREE QUARTERS: ticks are floor/10 apart, so 3/4 leaves a
+				// 10 ms window and a scheduling delay would fail a correct implementation.
 				client.paneDeathAfter = testLivenessFloor / 2
 
 				response, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
@@ -462,12 +463,9 @@ var _ = Describe("LocalBackend", func() {
 			})
 		})
 
-		// ⚠️ THE GUARD'S OWN ERROR PATH IS THE ONE THAT CAN ORPHAN A PANE, SO IT IS SPEC'D. A
-		// failed pane listing is NOT a dead pane: the guard reaches no verdict and the pane may be
-		// perfectly alive, so returning without closing it leaves a live tab no caller was told
-		// about, that `stop` cannot reach (it resolves ownership from the store, which holds no
-		// entry), and that a retry of the same create would duplicate, because that retry finds no
-		// entry for the task and passes the dedup.
+		// ⚠️ THE GUARD'S OWN ERROR PATH IS THE ONE THAT CAN ORPHAN A PANE. A failed listing is NOT
+		// a dead pane — the guard reaches no verdict — so returning without closing leaves a live
+		// tab no caller was told about, unreachable by `stop`, and duplicated by any retry.
 		It(
 			"closes the pane when the liveness check fails, rather than leaving it unrecorded",
 			func() {
@@ -485,13 +483,9 @@ var _ = Describe("LocalBackend", func() {
 			},
 		)
 
-		// ⚠️ THE SHIPPED FLOOR IS EXERCISED HERE, NOT MERELY RESTATED. Asserting
-		// `DefaultLivenessFloor == 1500ms` would only repeat the constant's own definition — it
-		// could not fail while that constant was unchanged — and would leave the behaviour at
-		// that value untested, though the value is exactly what decides whether a launcher dying
-		// a second after spawn is caught or reported as a worker. So this spec runs the real
-		// default (no LivenessFloor configured) against a launcher that dies at ~1.2 s, which is
-		// the case SC1 names. It is the one spec in this file that pays the shipped floor.
+		// ⚠️ THE SHIPPED FLOOR IS EXERCISED, NOT MERELY RESTATED: asserting the constant's own
+		// value could not fail while it was unchanged. This runs the real default against a
+		// launcher dying at ~1.2 s — the case SC1 names — and is the one spec paying that floor.
 		It("catches a launcher that dies a second after spawn, at the shipped floor", func() {
 			unconfigured := pkg.NewLocalBackend(client, failing, pkg.LocalConfig{
 				VaultDir:     vault,
@@ -1769,6 +1763,27 @@ var _ = Describe("LocalBackend", func() {
 			Expect(err).To(BeNil())
 			Expect(response.Worker.State).To(Equal(pkg.WorkerStateStopped))
 			Expect(client.killed).To(BeEmpty())
+			workers, listErr := store.List(ctx)
+			Expect(listErr).To(BeNil())
+			Expect(workers).To(BeEmpty())
+		})
+
+		// ⚠️ THE SPEC THAT CATCHES THE TAB LEAK. A held pane still exists and `kill-pane` still
+		// closes it, so it must be KILLED — unlike the spec above, where the pane is absent and
+		// there is nothing to close. Skipping the kill drops the record, reports success, and
+		// leaves the tab open holding its output, unreachable by any later call.
+		It("still kills a held pane, rather than leaving its tab open", func() {
+			created, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
+			Expect(err).To(BeNil())
+			// Held from here on: the pane still exists, but its process is gone.
+			client.paneDeathAfter = time.Nanosecond
+			Expect(client.panes).NotTo(BeEmpty())
+
+			response, err := backend.Stop(ctx, pkg.StopRequest{WorkerID: created.Worker.WorkerID})
+
+			Expect(err).To(BeNil())
+			Expect(response.Worker.State).To(Equal(pkg.WorkerStateStopped))
+			Expect(client.killed).To(HaveLen(1))
 			workers, listErr := store.List(ctx)
 			Expect(listErr).To(BeNil())
 			Expect(workers).To(BeEmpty())
