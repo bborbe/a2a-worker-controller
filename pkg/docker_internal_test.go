@@ -73,6 +73,22 @@ var _ = Describe("createRun", func() {
 		))
 	})
 
+	// The platform is pinned in argv rather than left to the daemon's host-platform resolution.
+	// On an arm64 host an amd64-only image otherwise fails BEFORE pulling, with `no matching
+	// manifest for linux/arm64/v8` — and only once the image is absent from the local store,
+	// which is why a cached image hides the defect.
+	It("runs the worker on the build platform", func() {
+		args := run(nil, nil)
+		index := -1
+		for i, arg := range args {
+			if arg == "--platform" {
+				index = i
+			}
+		}
+		Expect(index).To(BeNumerically(">=", 0))
+		Expect(args[index+1]).To(Equal("linux/amd64"))
+	})
+
 	// The image closes the argv: anything appended after it would be read as the container's
 	// command rather than as a run flag.
 	It("keeps the image last", func() {

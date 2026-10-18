@@ -99,7 +99,7 @@ export LISTEN=:8080
 export SENTRY_DSN=<dsn>
 export A2A_PUBLIC_URL=http://localhost:8080
 export A2A_AUTH_TOKEN=<token>
-export WORKER_IMAGE=bborbe/agent-claude:v0.19.1
+export WORKER_IMAGE=bborbe/agent-claude:v0.21.0
 export ANTHROPIC_AUTH_TOKEN=<router key>   # forwarded to workers; see the note above
 
 a2a-worker-controller
@@ -112,7 +112,7 @@ docker run --rm -p 8080:8080 \
   -e LISTEN=:8080 \
   -e A2A_PUBLIC_URL=http://localhost:8080 \
   -e A2A_AUTH_TOKEN \
-  -e WORKER_IMAGE=bborbe/agent-claude:v0.19.1 \
+  -e WORKER_IMAGE=bborbe/agent-claude:v0.21.0 \
   bborbe/a2a-worker-controller:latest
 ```
 

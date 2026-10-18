@@ -76,6 +76,21 @@ const routerBaseURL = "http://host.docker.internal:8788"
 // the value travels in the child process's environment, so `ps` cannot read it.
 const tokenEnvName = "INTERACTIVE_AUTH_TOKEN"
 
+// workerPlatform is the platform every worker container is run with.
+//
+// ⚠️ WITHOUT IT THE DOCKER BACKEND IS DEAD ON A NON-AMD64 HOST, not merely slow. The worker
+// image is published amd64-only, and `docker run` resolves the HOST platform before it looks
+// for a local copy: on an arm64 Mac it fails before pulling, with `no matching manifest for
+// linux/arm64/v8` and exit 125. A cached image hides this — the run warns about the platform
+// mismatch and proceeds under emulation — so the defect appears only once the cache is cold,
+// which is exactly when a retry is most likely to be attempted. `docker pull` needs the same
+// flag for the same reason, so the cache cannot be refilled by hand without it either.
+//
+// ⚠️ IT MUST MATCH Makefile.docker's BUILD PLATFORM. Build and run are independent docker
+// invocations, so pinning the build does not pin the run; this constant is the run-side half
+// of that pair and the two must be changed together.
+const workerPlatform = "linux/amd64"
+
 // The number of random bytes behind a worker id and behind a worker token.
 const (
 	workerIDBytes = 8
@@ -505,6 +520,7 @@ func createRun(
 ) ([]string, []string) {
 	baseArgs := []string{
 		"run", "-d",
+		"--platform", workerPlatform,
 		"--name", containerName(workerID),
 		"--label", controllerLabel + "=" + controllerLabelValue,
 		"--label", workerIDLabel + "=" + string(workerID),
