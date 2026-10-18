@@ -401,8 +401,7 @@ var _ = Describe("LocalBackend", func() {
 			Expect(client.spawns).To(HaveLen(1))
 		})
 
-		// ⚠️ THESE MUST FAIL WITHOUT THE GUARD. Each drives a launcher that dies on its own — the
-		// one shape the spawn reply cannot report — so with the wait reverted every one fails.
+		// ⚠️ THESE MUST FAIL WITHOUT THE GUARD: each drives a launcher that dies on its own.
 		Describe("a launcher that exits before its worker starts", func() {
 			It("fails the create rather than reporting a running worker", func() {
 				// Dies before the guard's first look: the launcher that never started at all — a
@@ -418,6 +417,10 @@ var _ = Describe("LocalBackend", func() {
 				// safe, and the two want opposite answers.
 				Expect(err.Error()).NotTo(ContainSubstring("spawn worker tab for task"))
 				Expect(response).To(BeNil())
+				// ⚠️ ASSERTED BECAUSE A CUT OF THIS FIX LEAKED IT: this branch reads the LIVENESS
+				// list, so a pane missing here is HELD — a real tab, unreachable by `Stop`.
+				Expect(client.killed).To(HaveLen(1))
+				Expect(client.killed[0].paneID).To(Equal("pane-1001"))
 			})
 
 			It("leaves no worker in the store, so a retry is not refused as a duplicate", func() {
@@ -1768,10 +1771,8 @@ var _ = Describe("LocalBackend", func() {
 			Expect(workers).To(BeEmpty())
 		})
 
-		// ⚠️ THE SPEC THAT CATCHES THE TAB LEAK. A held pane still exists and `kill-pane` still
-		// closes it, so it must be KILLED — unlike the spec above, where the pane is absent and
-		// there is nothing to close. Skipping the kill drops the record, reports success, and
-		// leaves the tab open holding its output, unreachable by any later call.
+		// ⚠️ THE SPEC THAT CATCHES THE TAB LEAK: a held pane still exists and `kill-pane` still
+		// closes it, so it must be KILLED — unlike the spec above, where nothing is there to close.
 		It("still kills a held pane, rather than leaving its tab open", func() {
 			created, err := backend.Create(ctx, pkg.CreateRequest{Task: task})
 			Expect(err).To(BeNil())

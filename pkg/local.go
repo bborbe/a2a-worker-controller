@@ -1283,9 +1283,14 @@ func (b *localBackend) awaitLivePane(ctx context.Context, guiID string, paneID s
 			// interpolated between the words — `pane "pane-1001" exited immediately` — would
 			// read as the same sentence to a human and fail every substring match.
 			//
-			// ⚠️ THIS IS THE ONE FAILURE THAT CLOSES NOTHING, AND THAT IS WHY IT IS THE ONE THE
-			// CALLER MAY RETRY BLINDLY. The pane is already absent, so there is no tab to clean
-			// up and no second tab a retry could open.
+			// ⚠️ THIS BRANCH CLOSES THE PANE, AND IT IS THE COMMONEST OF THE THREE. It reads the
+			// LIVENESS list, so a pane missing here is either gone or HELD — and under
+			// `exit_behavior = "Hold"` the launcher-dies-at-once case this guard exists for is
+			// the held one. A held pane is a real tab: leaving it open with no store entry means
+			// `Stop` cannot reach it, because Stop resolves ownership from the store, and a retry
+			// of the same create opens a SECOND tab for the task. So this closes exactly like the
+			// two sibling branches below, and it is the one that fires most often.
+			b.closeUnrecordedPane(ctx, guiID, paneID)
 			return errors.Errorf(ctx, "pane exited immediately: %q", paneID)
 		}
 		select {
