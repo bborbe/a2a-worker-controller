@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.14.1
 
 - fix: pin the worker container's platform with `--platform linux/amd64` on `docker run`. The worker image is published amd64-only, and without the flag `docker run` resolves the HOST platform before it looks for a local copy: on an arm64 host it fails before pulling with `no matching manifest for linux/arm64/v8` and exit 125. A cached image hid the defect — the run warned about the platform mismatch and proceeded under emulation — so the docker backend worked until the image left the local store and then died, and the failure surfaced through the A2A layer as `the controller reported the control call FAILED`, which reads as a broken channel rather than a packaging mismatch. ⚠️ `docker pull` needs the same flag for the same reason, so an evicted image cannot be refilled by any ordinary path; the missing pin is the difference between a degraded target and a dead one. The constant must match `Makefile.docker`'s build platform, since build and run are independent docker invocations. Also raises the README and `example.env` worker pins from `v0.19.1` to `v0.21.0` to match the deployed wrapper — the old pin cannot pass a permission gate, so gate evidence gathered with it was worthless.
 
