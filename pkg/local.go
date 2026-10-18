@@ -307,8 +307,16 @@ type WeztermClient interface {
 	// Spawn opens a tab running inner as `bash -lc inner`, in the GUI guiID names, in the
 	// window windowID names when it is not empty, and returns the new pane's id.
 	Spawn(ctx context.Context, guiID string, windowID string, inner string) (string, error)
-	// PaneIDs returns the id of every pane the GUI guiID names has.
+	// PaneIDs returns the id of every pane the GUI guiID names has, INCLUDING a pane whose
+	// process has exited and is being held open by `exit_behavior = "Hold"`. Existence is what
+	// `Stop` needs, because such a pane is still closable; ask LivePaneIDs for liveness.
 	PaneIDs(ctx context.Context, guiID string) ([]string, error)
+	// LivePaneIDs returns the id of every pane the GUI guiID names whose process is still
+	// running — a strictly smaller set than PaneIDs, and the one the create guard needs.
+	//
+	// ⚠️ THE TWO ARE NOT INTERCHANGEABLE. A held pane is one PaneIDs names and LivePaneIDs does
+	// not; treating that pane as absent is what makes `Stop` skip its kill and leak the tab.
+	LivePaneIDs(ctx context.Context, guiID string) ([]string, error)
 	// KillPane closes the pane paneID names in the GUI guiID names.
 	KillPane(ctx context.Context, guiID string, paneID string) error
 	// SendText types text into the pane paneID names, submits it, and does not return until the
@@ -373,6 +381,16 @@ func (c *execWeztermClient) PaneIDs(ctx context.Context, guiID string) ([]string
 		return nil, err
 	}
 	return parsePaneIDs(ctx, stdout)
+}
+
+// LivePaneIDs returns the panes whose process is still running. It is the same wezterm call as
+// PaneIDs with a different parse — the invocation is one, the question asked of it is not.
+func (c *execWeztermClient) LivePaneIDs(ctx context.Context, guiID string) ([]string, error) {
+	stdout, err := c.run(ctx, guiID, []string{"cli", "list", "--format", "json"})
+	if err != nil {
+		return nil, err
+	}
+	return parseLivePaneIDs(ctx, stdout)
 }
 
 // KillPane closes a pane. Killing the pane is what stops the worker: the pane's process is
@@ -627,21 +645,89 @@ type weztermPane struct {
 	// one pane numbered "0" — every real pane missing, so every stored worker is judged dead
 	// and erased. A field wezterm no longer sends must fail this call loudly instead.
 	PaneID *int `json:"pane_id"`
+	// CWD is the pane's working directory, and it is what separates a live pane from a HELD one.
+	//
+	// ⚠️ A POINTER FOR THE SAME REASON AS PaneID: an absent field must be distinguishable from an
+	// empty one, because a dropped field has to fail this call loudly rather than silently mark
+	// every worker dead.
+	CWD *string `json:"cwd"`
 }
 
 // parsePaneIDs reads the pane ids out of `wezterm cli list --format json`. The pane id is a
 // JSON number there and a string on the control API's schema, so it is formatted rather than
 // passed through.
 //
+// ⚠️ THIS LIST IS EVERY PANE THAT EXISTS, INCLUDING A HELD ONE, AND THAT IS DELIBERATE. The
+// operator's `wezterm.lua` sets `config.exit_behavior = "Hold"`, so a pane whose command exits
+// stays OPEN holding its output: its process is gone but the pane object is still there and
+// `kill-pane` still closes it. `Stop` reads this list to decide whether to kill
+// (`if live[worker.PaneID]`), so a held pane MUST appear here — filtering it out would skip the
+// kill, remove the record, report success, and leave the tab open holding its output with
+// nothing naming it. Liveness is a different question, asked by `parseLivePaneIDs` below and
+// used only by the create guard.
+//
 // A pane carrying no pane_id is an error rather than a skipped entry: the list is what decides
 // which workers are alive, so an entry that cannot be read must not quietly shrink the set.
 // An empty list is not an error — a GUI with no panes has none, and that answer is a real one.
 func parsePaneIDs(ctx context.Context, stdout string) ([]string, error) {
+	panes, err := parsePanes(ctx, stdout)
+	if err != nil {
+		return nil, err
+	}
+	paneIDs := make([]string, 0, len(panes))
+	for _, pane := range panes {
+		paneIDs = append(paneIDs, strconv.Itoa(*pane.PaneID))
+	}
+	return paneIDs, nil
+}
+
+// parseLivePaneIDs reads the ids of the panes that still hold a LIVE PROCESS, which is a
+// strictly smaller set than the one `parsePaneIDs` returns.
+//
+// ⚠️ A PANE WITH NO WORKING DIRECTORY IS NOT A LIVE PANE, AND THAT IS THE WHOLE DISCRIMINATOR.
+// Under `config.exit_behavior = "Hold"` a launcher that dies at once leaves a pane that still
+// EXISTS but holds no process, and a check on pane existence alone therefore reads it as a
+// healthy worker — which is why the guard v0.12.2 shipped did not work. Measured 2026-10-18: a
+// stub exiting 127 left `cwd: ""` and the default `wezterm` title, persisting across 1 s, 3 s
+// and 8 s, while every live worker pane carried `cwd: file:///…` and its `✳ ⚙ <task>` title. A
+// pane whose process is gone has no working directory, so the absence of one is what this drops.
+//
+// ⚠️ IT IS A SEPARATE FUNCTION RATHER THAN A FILTER ON parsePaneIDs, AND THE SPLIT IS THE FIX.
+// The two answer different questions — "does this pane exist" and "is its process alive" — and
+// only the create guard wants the second. Collapsing them makes "held" and "closed" the same
+// answer for `Stop`, which then skips the kill and leaks the tab.
+func parseLivePaneIDs(ctx context.Context, stdout string) ([]string, error) {
+	panes, err := parsePanes(ctx, stdout)
+	if err != nil {
+		return nil, err
+	}
+	paneIDs := make([]string, 0, len(panes))
+	for index, pane := range panes {
+		if pane.CWD == nil {
+			// ⚠️ ABSENT IS NOT EMPTY, AND READING IT AS EMPTY WOULD MARK EVERY WORKER DEAD. The
+			// destructive direction is the one to fail on, so a dropped field fails the call —
+			// the same reasoning that makes pane_id a pointer.
+			return nil, errors.Errorf(
+				ctx,
+				"parse wezterm pane list failed: entry %d carries no cwd",
+				index,
+			)
+		}
+		if *pane.CWD == "" {
+			continue
+		}
+		paneIDs = append(paneIDs, strconv.Itoa(*pane.PaneID))
+	}
+	return paneIDs, nil
+}
+
+// parsePanes decodes `wezterm cli list --format json` into its entries, failing when one carries
+// no pane_id.
+func parsePanes(ctx context.Context, stdout string) ([]weztermPane, error) {
 	var panes []weztermPane
 	if err := json.Unmarshal([]byte(stdout), &panes); err != nil {
 		return nil, errors.Wrap(ctx, err, "parse wezterm pane list failed")
 	}
-	paneIDs := make([]string, 0, len(panes))
 	for index, pane := range panes {
 		if pane.PaneID == nil {
 			return nil, errors.Errorf(
@@ -650,9 +736,8 @@ func parsePaneIDs(ctx context.Context, stdout string) ([]string, error) {
 				index,
 			)
 		}
-		paneIDs = append(paneIDs, strconv.Itoa(*pane.PaneID))
 	}
-	return paneIDs, nil
+	return panes, nil
 }
 
 // spawnArgs is the wezterm invocation that opens a worker's tab, mirroring the supervisor's
@@ -1175,7 +1260,12 @@ func (b *localBackend) awaitLivePane(ctx context.Context, guiID string, paneID s
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
-		live, err := b.livePaneIDs(ctx, guiID)
+		// ⚠️ THE LIVENESS LIST, NOT THE EXISTENCE ONE, AND THIS IS THE FIX. Under
+		// `exit_behavior = "Hold"` a launcher that dies leaves a pane that still EXISTS, so the
+		// existence list contains it and the guard would report a healthy worker for a dead one —
+		// exactly what v0.12.2 shipped. Only this call site wants the liveness question; `Stop`
+		// and `reconcileWorkers` keep the existence list, because a held pane is still closable.
+		live, err := b.liveProcessPaneIDs(ctx, guiID)
 		if err != nil {
 			// ⚠️ A CHECK THAT FAILED IS NOT A PANE THAT DIED, AND THE DIFFERENCE DECIDES WHETHER
 			// THE PANE IS CLOSED. A failed pane listing says nothing about this pane — it may be
@@ -1193,9 +1283,14 @@ func (b *localBackend) awaitLivePane(ctx context.Context, guiID string, paneID s
 			// interpolated between the words — `pane "pane-1001" exited immediately` — would
 			// read as the same sentence to a human and fail every substring match.
 			//
-			// ⚠️ THIS IS THE ONE FAILURE THAT CLOSES NOTHING, AND THAT IS WHY IT IS THE ONE THE
-			// CALLER MAY RETRY BLINDLY. The pane is already absent, so there is no tab to clean
-			// up and no second tab a retry could open.
+			// ⚠️ THIS BRANCH CLOSES THE PANE, AND IT IS THE COMMONEST OF THE THREE. It reads the
+			// LIVENESS list, so a pane missing here is either gone or HELD — and under
+			// `exit_behavior = "Hold"` the launcher-dies-at-once case this guard exists for is
+			// the held one. A held pane is a real tab: leaving it open with no store entry means
+			// `Stop` cannot reach it, because Stop resolves ownership from the store, and a retry
+			// of the same create opens a SECOND tab for the task. So this closes exactly like the
+			// two sibling branches below, and it is the one that fires most often.
+			b.closeUnrecordedPane(ctx, guiID, paneID)
 			return errors.Errorf(ctx, "pane exited immediately: %q", paneID)
 		}
 		select {
@@ -1445,6 +1540,28 @@ func (b *localBackend) livePaneIDs(ctx context.Context, guiID string) (map[strin
 	paneIDs, err := b.client.PaneIDs(ctx, guiID)
 	if err != nil {
 		return nil, errors.Wrap(ctx, err, "list wezterm panes failed")
+	}
+	live := make(map[string]bool, len(paneIDs))
+	for _, paneID := range paneIDs {
+		live[paneID] = true
+	}
+	return live, nil
+}
+
+// liveProcessPaneIDs returns the panes that still hold a live process, keyed by pane id.
+//
+// ⚠️ IT IS NOT livePaneIDs AND MUST NOT REPLACE IT. That one answers "does this pane exist" and
+// is what `Stop`, `reconcileWorkers` and `killPane` need, because a held pane still exists and is
+// still closable. This one answers "is its process alive" and is wanted only by the create guard,
+// where a held pane means the launcher died and the create must fail. A held pane is in the first
+// set and not the second, so swapping one for the other anywhere silently changes the answer.
+func (b *localBackend) liveProcessPaneIDs(
+	ctx context.Context,
+	guiID string,
+) (map[string]bool, error) {
+	paneIDs, err := b.client.LivePaneIDs(ctx, guiID)
+	if err != nil {
+		return nil, errors.Wrap(ctx, err, "list live wezterm panes failed")
 	}
 	live := make(map[string]bool, len(paneIDs))
 	for _, paneID := range paneIDs {

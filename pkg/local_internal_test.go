@@ -116,11 +116,55 @@ var _ = Describe("local backend internals", func() {
 
 	Describe("parsePaneIDs", func() {
 		It("reads pane ids out of the json list and renders them as strings", func() {
-			ids, err := parsePaneIDs(context.Background(), `[{"pane_id":3},{"pane_id":17}]`)
+			ids, err := parsePaneIDs(
+				context.Background(),
+				`[{"pane_id":3,"cwd":"file:///vault"},{"pane_id":17,"cwd":"file:///vault"}]`,
+			)
 
 			Expect(err).To(BeNil())
 			Expect(ids).To(Equal([]string{"3", "17"}))
 		})
+
+		// ⚠️ THE TWO LISTS ANSWER DIFFERENT QUESTIONS AND THESE SPECS PIN THE DIFFERENCE. A pane
+		// whose launcher died is HELD: it still exists — so parsePaneIDs keeps it, and `Stop` can
+		// still close it — but it has no process, so parseLivePaneIDs drops it and the create
+		// guard fails. Collapsing the two makes `Stop` skip its kill and leak the tab, so a spec
+		// that only exercises one of them is not enough.
+		It("keeps a held pane in the existence list, so it can still be closed", func() {
+			ids, err := parsePaneIDs(
+				context.Background(),
+				`[{"pane_id":3,"cwd":"file:///vault"},{"pane_id":17,"cwd":""}]`,
+			)
+
+			Expect(err).To(BeNil())
+			Expect(ids).To(Equal([]string{"3", "17"}))
+		})
+
+		// ⚠️ THIS IS THE SPEC THAT WOULD HAVE CAUGHT v0.12.2's DEFECT. `exit_behavior = "Hold"`
+		// keeps a dead launcher's pane OPEN, so a check on pane existence alone reports it as a
+		// healthy worker — measured 2026-10-18, a stub exiting 127 left `cwd: ""` and the guard
+		// passed the create.
+		It("drops a held pane from the liveness list, so the guard fails the create", func() {
+			ids, err := parseLivePaneIDs(
+				context.Background(),
+				`[{"pane_id":3,"cwd":"file:///vault"},{"pane_id":17,"cwd":""}]`,
+			)
+
+			Expect(err).To(BeNil())
+			Expect(ids).To(Equal([]string{"3"}))
+		})
+
+		// ⚠️ ABSENT IS NOT EMPTY, AND THE DESTRUCTIVE DIRECTION IS THE ONE TO FAIL ON. Reading an
+		// absent cwd as empty would mark every worker dead the moment wezterm renamed the field.
+		It(
+			"fails the liveness read when an entry carries no cwd, rather than reading it as empty",
+			func() {
+				_, err := parseLivePaneIDs(context.Background(), `[{"pane_id":3}]`)
+
+				Expect(err).NotTo(BeNil())
+				Expect(err.Error()).To(ContainSubstring("cwd"))
+			},
+		)
 
 		It("returns an empty list for a gui with no panes", func() {
 			ids, err := parsePaneIDs(context.Background(), `[]`)
