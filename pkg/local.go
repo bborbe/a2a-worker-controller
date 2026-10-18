@@ -627,11 +627,32 @@ type weztermPane struct {
 	// one pane numbered "0" — every real pane missing, so every stored worker is judged dead
 	// and erased. A field wezterm no longer sends must fail this call loudly instead.
 	PaneID *int `json:"pane_id"`
+	// CWD is the pane's working directory, and it is what separates a live pane from a HELD one.
+	//
+	// ⚠️ A POINTER FOR THE SAME REASON AS PaneID: an absent field must be distinguishable from an
+	// empty one, because a dropped field has to fail this call loudly rather than silently mark
+	// every worker dead.
+	CWD *string `json:"cwd"`
 }
 
 // parsePaneIDs reads the pane ids out of `wezterm cli list --format json`. The pane id is a
 // JSON number there and a string on the control API's schema, so it is formatted rather than
 // passed through.
+//
+// ⚠️ A PANE WITH NO WORKING DIRECTORY IS NOT A LIVE PANE, AND THE FILTER BELOW IS THE FIX. The
+// operator's `wezterm.lua` sets `config.exit_behavior = "Hold"`, which keeps a pane OPEN after
+// its command exits, so a launcher that dies at once leaves a pane that still EXISTS but holds no
+// process — and a check on pane existence alone then reads it as a healthy worker. Measured
+// 2026-10-18: a stub exiting 127 left a pane with `cwd: ""` and the default `wezterm` title,
+// persisting across 1 s, 3 s and 8 s, while every live worker pane carried its working directory
+// (`cwd: file:///…`, title `✳ ⚙ <task>`). A pane whose process is gone has no working directory,
+// so the absence of one is exactly what this list drops.
+//
+// ⚠️ THE FILTER IS HERE RATHER THAN AT THE GUARD, SO EVERY CALLER AGREES ON WHAT "ALIVE" MEANS.
+// `awaitLivePane` needs it to fail a dead create; `reconcileWorkers` needs the same answer or
+// `list` keeps reporting a worker whose process is gone; `killPane` needs it to treat a held pane
+// as already closed. Filtering at the one place the pane list is read is what keeps those three
+// from drifting apart.
 //
 // A pane carrying no pane_id is an error rather than a skipped entry: the list is what decides
 // which workers are alive, so an entry that cannot be read must not quietly shrink the set.
@@ -649,6 +670,17 @@ func parsePaneIDs(ctx context.Context, stdout string) ([]string, error) {
 				"parse wezterm pane list failed: entry %d carries no pane_id",
 				index,
 			)
+		}
+		if pane.CWD == nil {
+			return nil, errors.Errorf(
+				ctx,
+				"parse wezterm pane list failed: entry %d carries no cwd",
+				index,
+			)
+		}
+		// A held pane: it exists, but its process is gone, so it is not a live worker.
+		if *pane.CWD == "" {
+			continue
 		}
 		paneIDs = append(paneIDs, strconv.Itoa(*pane.PaneID))
 	}
