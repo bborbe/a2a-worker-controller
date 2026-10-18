@@ -417,8 +417,8 @@ var _ = Describe("LocalBackend", func() {
 				// safe, and the two want opposite answers.
 				Expect(err.Error()).NotTo(ContainSubstring("spawn worker tab for task"))
 				Expect(response).To(BeNil())
-				// ⚠️ ASSERTED BECAUSE A CUT OF THIS FIX LEAKED IT: this branch reads the LIVENESS
-				// list, so a pane missing here is HELD — a real tab, unreachable by `Stop`.
+				// ⚠️ ASSERTED BECAUSE THIS BRANCH CAN LEAK A TAB: it reads the LIVENESS list, so a
+				// pane missing here is HELD — a real tab, with no store entry to reach it by.
 				Expect(client.killed).To(HaveLen(1))
 				Expect(client.killed[0].paneID).To(Equal("pane-1001"))
 			})
@@ -488,7 +488,7 @@ var _ = Describe("LocalBackend", func() {
 
 		// ⚠️ THE SHIPPED FLOOR IS EXERCISED, NOT MERELY RESTATED: asserting the constant's own
 		// value could not fail while it was unchanged. This runs the real default against a
-		// launcher dying at ~1.2 s — the case SC1 names — and is the one spec paying that floor.
+		// launcher dying at ~1.2 s — inside the shipped floor, where a zero-wait read passes.
 		It("catches a launcher that dies a second after spawn, at the shipped floor", func() {
 			unconfigured := pkg.NewLocalBackend(client, failing, pkg.LocalConfig{
 				VaultDir:     vault,

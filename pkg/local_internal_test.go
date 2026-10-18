@@ -128,8 +128,8 @@ var _ = Describe("local backend internals", func() {
 		// ⚠️ THE TWO LISTS ANSWER DIFFERENT QUESTIONS AND THESE SPECS PIN THE DIFFERENCE. A pane
 		// whose launcher died is HELD: it still exists — so parsePaneIDs keeps it, and `Stop` can
 		// still close it — but it has no process, so parseLivePaneIDs drops it and the create
-		// guard fails. Collapsing the two is what made the first cut of this fix leak tabs, so a
-		// spec that only exercises one of them is not enough.
+		// guard fails. Collapsing the two makes `Stop` skip its kill and leak the tab, so a spec
+		// that only exercises one of them is not enough.
 		It("keeps a held pane in the existence list, so it can still be closed", func() {
 			ids, err := parsePaneIDs(
 				context.Background(),
