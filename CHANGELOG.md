@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.16.0
 
 - feat: a repeated `create` for a task that already has a worker returns that worker and its token with `reused: true` instead of refusing. The controller now keeps each worker's bearer token in a `0600` JSON store (`~/.local/state/a2a-worker-controller/docker-workers.json`, written into a `0750` directory and removed when the worker is stopped), which is what makes the retry answerable: before, the token existed only in the create reply, so a spawn that timed out after the container started left a worker whose token the caller never received, and a blind retry hit a refusal that forced stop-then-recreate — the orphan path. ⚠️ **This is a deliberate security trade: the token moves from memory-only to at rest.** The token still never reaches a `list` response, a log line or a supervisor record. A worker whose token cannot be persisted is removed rather than left running, so a failed store write cannot strand a worker nobody can authenticate to; a worker created before the store existed still refuses by id, keeping the stop-then-create recovery reachable.
 
