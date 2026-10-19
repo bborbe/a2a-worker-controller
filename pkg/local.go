@@ -119,6 +119,20 @@ type LocalConfig struct {
 	// than a test hook: the wait is paid on every create, so a deployment whose launcher is
 	// slower to settle can raise it. Zero or negative means DefaultLivenessFloor.
 	LivenessFloor time.Duration
+	// BindTimeout is how long Create polls the session registry for the session its tab started,
+	// overriding DefaultLocalBindTimeout. Zero or negative means the default. Like the colour
+	// send, the poll runs under the backend's mutex, so this is also the most a create can make
+	// list and stop wait for it.
+	BindTimeout time.Duration
+	// SessionRegistryDir is Claude Code's session registry, one `<pid>.json` per live session.
+	// Empty uses ~/.claude/sessions. It exists so a spec can drive the bind against a temporary
+	// directory; a deployment never sets it.
+	SessionRegistryDir string
+	// VaultResolver resolves a create's `vault` name — and the configured VaultDir's own name —
+	// from vault-cli's config. Nil uses NewVaultCLIConfigResolver.
+	VaultResolver LocalVaultResolver
+	// VaultCLI is what the session binding writes through. Nil uses NewExecVaultCLI.
+	VaultCLI VaultCLI
 }
 
 // LocalWorker is one worker the local backend owns, as the ownership store records it.
@@ -152,6 +166,25 @@ type LocalWorker struct {
 	// is what refreshSessionIDs measures against: a value that was already there when this
 	// worker started cannot be its own, and a value that appeared afterwards can.
 	CreateSessionID string `json:"create_session_id"`
+	// VaultDir and TasksDir are the vault the worker's task file lives in, as its create
+	// resolved it.
+	//
+	// ⚠️ THEY ARE RECORDED BECAUSE A CREATE MAY NAME A VAULT OTHER THAN THE CONFIGURED ONE, and
+	// refreshSessionIDs must re-read the file THAT worker's task lives in — reading the configured
+	// vault would find no file, and the worker's binding would never be reported. An entry written
+	// before the fields existed carries neither and falls back to the configured vault, which is
+	// the only vault such an entry could have been created in.
+	VaultDir string `json:"vault_dir,omitempty"`
+	TasksDir string `json:"tasks_dir,omitempty"`
+}
+
+// vault returns the vault the worker's task file lives in, the configured one for an entry that
+// predates the per-worker record.
+func (w LocalWorker) vault(config LocalConfig) LocalVault {
+	if w.VaultDir == "" {
+		return LocalVault{Dir: config.VaultDir}
+	}
+	return LocalVault{Dir: w.VaultDir, TasksDir: w.TasksDir}
 }
 
 // worker renders the stored worker as the control API's Worker shape.
@@ -929,6 +962,16 @@ func workPrompt(task TaskName) string {
 	return localWorkPrompt + `"` + string(task) + `"`
 }
 
+// tabPrompt is the whole prompt a worker's tab is started with: the caller's first step, a blank
+// line, then the work prompt — the shape the supervisor's own `--first-step` sends. An empty first
+// step is the work prompt alone, byte for byte what every create sent before the field existed.
+func tabPrompt(task TaskName, firstStep string) string {
+	if firstStep == "" {
+		return workPrompt(task)
+	}
+	return firstStep + "\n\n" + workPrompt(task)
+}
+
 // tabCommand builds the shell command a worker's tab runs, mirroring the supervisor's own tab
 // spawn: the caller's environment exported, then the vault directory, then the launcher with the
 // tab name and the work prompt.
@@ -950,12 +993,18 @@ func workPrompt(task TaskName) string {
 // must not hand this backend a secret it would not accept appearing in `ps`; the reserved-name
 // guard and the shell-name guard below are what stop a name from becoming syntax, and neither
 // can hide a value.
-func tabCommand(vaultDir string, launcher string, env map[string]string, task TaskName) string {
+func tabCommand(
+	vaultDir string,
+	launcher string,
+	env map[string]string,
+	task TaskName,
+	firstStep string,
+) string {
 	return shellEnvExports(env) +
 		"cd " + shellQuote(expandHome(vaultDir)) +
 		" && exec " + shellQuote(launcher) +
 		" -n " + shellQuote(tabNameFor(task)) +
-		" " + shellQuote(workPrompt(task))
+		" " + shellQuote(tabPrompt(task, firstStep))
 }
 
 // localEnvName matches a legal shell variable name.
@@ -1085,28 +1134,24 @@ func NewLocalBackend(client WeztermClient, store WorkerStore, config LocalConfig
 // The returned Token is EMPTY, and that is not a failure: a tab worker serves no A2A
 // endpoint, so there is nothing to authenticate to. The pane id is the handle instead.
 //
-// ⚠️ The returned SessionID is EMPTY TOO, AND THAT IS ALSO BY CONSTRUCTION RATHER THAN A GAP.
-// The session a worker binds to is written by that session, which the tab starts — after this
-// call has already returned — so anything the task file holds now belongs to an EARLIER session
-// of the same task. It is read once and kept as the worker's CreateSessionID, the baseline
-// `list` measures a real binding against, and it is never reported as this worker's own.
+// ⚠️ The returned SessionID is the session THIS create's tab registered under its tab name within
+// the bind window, and empty when none did. Whatever the task file held BEFORE the spawn belongs to
+// an EARLIER session of the same task: it is read once and kept as the worker's CreateSessionID,
+// the baseline `list` measures a later binding against, and it is never reported as this worker's
+// own. A session found here is also bound to the task — see bindSession and the reply's Bind.
 func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateResponse, error) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
 
-	// Refused before any work, so a request carrying a reserved, unexportable or path-shaped
-	// value fails fast rather than after a tab has been opened for a worker that must not start.
-	if err := validateTaskName(ctx, req.Task); err != nil {
+	if err := validateLocalCreate(ctx, req); err != nil {
 		return nil, err
 	}
-	if err := validateLocalEnv(ctx, req.Env); err != nil {
-		return nil, err
-	}
-
+	// ⚠️ THE VAULT IS RESOLVED FIRST, BECAUSE EVERY READ AFTER IT IS AGAINST IT — an unknown vault
+	// is refused rather than opening a worker in the configured vault for a task living elsewhere.
 	// ⚠️ BOTH RESOLUTIONS ARE REFUSED BEFORE ANY TAB IS OPENED. A launcher that is not an executable
 	// file, or a role this backend does not know, must be discovered here rather than from a pane
 	// that died on its own — after a worker had already been recorded as running.
-	chosen, role, err := b.resolveTask(ctx, req.Task)
+	vault, chosen, role, err := b.resolveCreate(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -1154,13 +1199,17 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	// id the baseline, which refreshSessionIDs then suppresses for the worker's whole life: a
 	// value equal to the baseline is never accepted, so the one id the worker does have would be
 	// the one id never reported.
-	baselineSessionID := b.taskSessionID(ctx, req.Task)
+	baselineSessionID := b.taskSessionID(ctx, vault, req.Task)
+	// ⚠️ THE TAB NAME'S EXISTING REGISTRY HOLDERS ARE SNAPSHOTTED BEFORE THE SPAWN FOR THE SAME
+	// STRUCTURAL REASON: a holder present before the tab existed cannot be this tab's session, so
+	// the bind can never pick up an earlier, still-live session of the same task.
+	preexisting := sessionIDsNamed(b.sessionRegistryDir(), tabNameFor(req.Task))
 
 	paneID, err := b.client.Spawn(
 		ctx,
 		guiID,
 		b.roleWindowID(req.Task, role),
-		tabCommand(b.config.VaultDir, chosen.Path, req.Env, req.Task),
+		tabCommand(vault.Dir, chosen.Path, req.Env, req.Task, req.FirstStep),
 	)
 	if err != nil {
 		// ⚠️ THE PANE ID IS GENUINELY UNKNOWN ON THIS PATH, WHICH IS WHY NONE IS NAMED HERE.
@@ -1194,11 +1243,13 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 		Task:     req.Task,
 		PaneID:   paneID,
 		GuiID:    guiID,
-		// ⚠️ SessionID IS DELIBERATELY LEFT EMPTY AND CreateSessionID IS THE BASELINE IT MUST
-		// DIFFER FROM. The baseline was read before the tab existed, so whatever the task file
+		// ⚠️ SessionID IS LEFT EMPTY UNTIL THE BIND BELOW FINDS THIS TAB'S OWN SESSION, AND
+		// CreateSessionID IS THE BASELINE A LATER READ MUST DIFFER FROM. The baseline was read before the tab existed, so whatever the task file
 		// held then belongs to an EARLIER session of the same task and must never be reported as
 		// this worker's.
 		CreateSessionID: baselineSessionID,
+		VaultDir:        vault.Dir,
+		TasksDir:        vault.TasksDir,
 	}
 	if err := b.recordWorker(ctx, guiID, workers, worker); err != nil {
 		return nil, err
@@ -1221,11 +1272,22 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	// expires into a logged, non-fatal timeout — see applyRoleColor — so the worst case is a few
 	// seconds and an uncoloured tab, never a stalled backend.
 	b.applyRoleColor(ctx, guiID, paneID, role)
+	// ⚠️ THE BIND RUNS LAST, AFTER THE RECORD AND THE COLOUR, FOR THE SAME REASON THE COLOUR DOES:
+	// it waits on the session the tab starts, and that wait must not widen the window in which a
+	// live tab can be orphaned. It is bounded by BindTimeout and never fatal — a session that never
+	// registers is a nil bind and a write that fails is a bind error, both on a successful reply.
+	//
+	// ⚠️ THIS IS WHAT A TAB WORKER NEVER DID BEFORE, AND IT IS WHY ITS SESSION ID STAYED EMPTY. The
+	// binding used to be left to the worker's own session writing the task file, which `claude -n`
+	// sessions may never do; the supervisor's tab path instead joined on the registry by tab name and
+	// wrote the binding itself, and this is that join.
+	bind := b.bindCreatedWorker(ctx, vault, &worker, preexisting)
 	return &CreateResponse{
 		Worker:         worker.worker(),
 		Token:          "",
 		Launcher:       chosen.Path,
 		LauncherSource: string(chosen.Source),
+		Bind:           bind,
 	}, nil
 }
 
@@ -1608,8 +1670,8 @@ func (b *localBackend) killPane(ctx context.Context, guiID string, worker *Local
 // An unresolvable read is reported empty rather than derived from the tab name, from the task
 // name or from a clock: a session id a caller cannot trust is worse than an absent one, because
 // it resolves to nothing while looking like a handle.
-func (b *localBackend) taskSessionID(ctx context.Context, task TaskName) string {
-	sessionID, err := readTaskSessionID(ctx, b.config.VaultDir, task)
+func (b *localBackend) taskSessionID(ctx context.Context, vault LocalVault, task TaskName) string {
+	sessionID, err := readTaskSessionID(ctx, vault, task)
 	if err != nil {
 		// Never fatal: the tab is already open by this point, so failing the create would
 		// orphan it — a live pane no caller was ever told about.
@@ -1648,7 +1710,11 @@ func (b *localBackend) refreshSessionIDs(
 ) ([]LocalWorker, bool) {
 	changed := false
 	for index := range workers {
-		sessionID, err := readTaskSessionID(ctx, b.config.VaultDir, workers[index].Task)
+		sessionID, err := readTaskSessionID(
+			ctx,
+			workers[index].vault(b.config),
+			workers[index].Task,
+		)
 		if err != nil {
 			// Never fatal: the entry's pane is live, so the worker is real whether or not its
 			// task file can be read — and failing the whole list over one unreadable file
@@ -1669,8 +1735,8 @@ func (b *localBackend) refreshSessionIDs(
 }
 
 // readTaskSessionID reads the session id the task's own frontmatter records.
-func readTaskSessionID(ctx context.Context, vaultDir string, task TaskName) (string, error) {
-	path := filepath.Join(expandHome(vaultDir), DefaultLocalTasksDir, string(task)+".md")
+func readTaskSessionID(ctx context.Context, vault LocalVault, task TaskName) (string, error) {
+	path := filepath.Join(expandHome(vault.Dir), vault.tasksDir(), string(task)+".md")
 	//nolint:gosec // G304: the path is the controller's own configured vault plus the task name
 	content, err := os.ReadFile(path)
 	if err != nil {

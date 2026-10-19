@@ -155,9 +155,27 @@ is **empty**, and the pane id is the only handle a caller has on it — it is wh
 messages through, while `stop` takes the `worker_id` (see the table above). For a `docker` or
 `k8s` worker both fields are empty and `a2a_url` is set.
 
-`session_id` is the Claude Code session the worker's tab bound to the task. **`create` returns
-it empty**, and that is by construction rather than a failure: the binding is written by the
-session the tab starts, which happens after `create` has returned. `create` reads the task's
+**The local backend's `create` takes two optional fields**, mirroring the supervisor's old
+`spawn_agent` tab path: `"vault":"<vault-cli name>"` and `"first_step":"<text>"`. `vault` names
+the vault the task lives in, resolved through vault-cli's own config (name → `path`, tasks
+directory, `claude_script`); the task's launcher, role and goals are read from **that** vault, the
+tab starts in its directory, and the binding below is written to it. Empty means `-local-vault`,
+exactly as before. ⚠️ An unknown or malformed name is **refused before any tab opens**.
+`first_step` is told to the worker ahead of its work prompt, as `<first_step>\n\n<work prompt>`.
+
+**`create` binds the worker's session to its task.** After the tab is recorded it polls the
+session registry (`~/.claude/sessions/<pid>.json`) for up to 8 s for a session whose `name` is the
+tab name, excluding any session that already held that name before the spawn, then applies the
+fleet's ownership rule through vault-cli: an empty `claude_session_id` is stamped
+(`vault-cli task set <task> claude_session_id <id> --vault <v>`), otherwise the owner is left alone
+and the session appended (`vault-cli task append-metrics-session <task> <id> --vault <v>`). The
+reply carries `"bind":{"action":"stamped"|"appended"}` or `"bind":{"error":"…"}`; **no `bind` at
+all** means no session registered within the window. ⚠️ A bind never fails the create — the
+worker is already running.
+
+`session_id` is the Claude Code session the worker's tab bound to the task. `create` returns the
+session the bind found, and **empty** when none registered in the window; then the binding may
+still be written later by the session the tab starts, after `create` has returned. `create` reads the task's
 `claude_session_id` once and records it as the baseline the worker's own binding must differ
 from; `list` re-reads each task file and reports the id once the file holds a value that is not
 that baseline. ⚠️ The create-time read is **synchronous, not deferred to `list`** — one file
