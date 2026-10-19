@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.15.1
 
 - fix: the `local` backend no longer leaks its own Anthropic credentials into a worker's tab. `wezterm cli spawn` propagates the calling process's environment into the new pane, and the controller's wrapper exports `ANTHROPIC_AUTH_TOKEN` for the **docker** backend — so every locally spawned worker inherited it, Claude Code switched from the launcher's subscription login to API-key auth, and `api.anthropic.com` answered `401 Invalid bearer token` on every turn. The spawn path now drops `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` from the environment it hands to `wezterm cli spawn` (`envWithoutCredentials`); every other variable, and a caller-supplied `env` — which travels in the tab's command line rather than this process's environment — is unchanged.
 
