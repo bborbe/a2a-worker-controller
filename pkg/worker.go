@@ -21,12 +21,11 @@ import "context"
 // A backend whose workers answer at their own URL still needs no schema change at all.
 type WorkerBackend interface {
 	// Create starts one worker serving the requested task and returns it together with
-	// its own bearer token. ⚠️ A task that already has a worker is REFUSED, naming that
-	// worker's id, rather than answered: only one worker is ever started per task, and the
-	// existing worker's token cannot be returned because the backend kept no copy of it —
-	// so a success reply would name a worker no caller could authenticate to, which reads
-	// as a working worker while being unreachable. The caller's recovery is to stop the
-	// named worker and create again.
+	// its own bearer token. ⚠️ A task that already has a worker is ANSWERED WITH IT, not
+	// started twice: the backend returns the same worker and the token it kept, with
+	// CreateResponse.Reused set. A backend that keeps no token still refuses by naming the
+	// existing worker's id, because a reply naming a worker no caller could authenticate to
+	// reads as a working worker while being unreachable.
 	Create(ctx context.Context, req CreateRequest) (*CreateResponse, error)
 
 	// List returns every worker the backend owns. It is rebuilt from the backend's own

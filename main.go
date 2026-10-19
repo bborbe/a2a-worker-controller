@@ -93,6 +93,14 @@ func (a *application) createHTTPServer() run.Func {
 			return err
 		}
 		dockerConfig.MountAllowlist = mountAllowlist
+		// The token store is what lets a retried create return the live worker instead of
+		// refusing. Resolved at startup so an unusable home directory stops the controller while
+		// the operator is looking at the config, rather than at the first retry hours later.
+		tokenStateFile, err := pkg.DefaultTokenStateFile(ctx)
+		if err != nil {
+			return err
+		}
+		dockerConfig.TokenStore = pkg.NewJSONTokenStore(tokenStateFile)
 		kubernetesBackend, err := a.kubernetesBackend(ctx, backend)
 		if err != nil {
 			return err
