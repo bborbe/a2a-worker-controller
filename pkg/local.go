@@ -398,7 +398,12 @@ func (c *execWeztermClient) Spawn(
 	windowID string,
 	inner string,
 ) (string, error) {
-	stdout, err := c.run(ctx, guiID, spawnArgs(windowID, inner))
+	stdout, err := c.runWithEnv(
+		ctx,
+		guiID,
+		spawnArgs(windowID, inner),
+		envWithoutCredentials(os.Environ()),
+	)
 	if err != nil {
 		return "", err
 	}
@@ -617,9 +622,20 @@ func (c *execWeztermClient) GuiID(ctx context.Context) (string, error) {
 // and because the GUI's socket changes every time it restarts; within one call every
 // invocation is handed the same one, so they cannot address two different GUIs.
 func (c *execWeztermClient) run(ctx context.Context, guiID string, args []string) (string, error) {
+	return c.runWithEnv(ctx, guiID, args, os.Environ())
+}
+
+// runWithEnv is run with an explicit child environment. Only the spawn path supplies its own —
+// see envWithoutCredentials for why.
+func (c *execWeztermClient) runWithEnv(
+	ctx context.Context,
+	guiID string,
+	args []string,
+	env []string,
+) (string, error) {
 	//nolint:gosec // G204: the binary is this backend's configured absolute path, not input
 	cmd := exec.CommandContext(ctx, c.binary, args...)
-	cmd.Env = envWithSocket(os.Environ(), guiID)
+	cmd.Env = envWithSocket(env, guiID)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -805,6 +821,44 @@ func envWithSocket(env []string, socket string) []string {
 		entries = append(entries, entry)
 	}
 	return append(entries, name+socket)
+}
+
+// workerCredentialEnvNames are the variables a worker's own launcher must own, never inherit
+// from the controller.
+//
+// ⚠️ `wezterm cli spawn` PROPAGATES THE CALLING PROCESS'S ENVIRONMENT INTO THE NEW PANE, so
+// every variable this process exports reaches the worker. The controller's wrapper exports
+// ANTHROPIC_AUTH_TOKEN because the DOCKER backend needs it, and on the local backend that
+// value silently overrides the launcher's subscription login: Claude Code switches from
+// subscription auth to API-key auth, and api.anthropic.com answers
+// `401 Invalid bearer token` on every turn. Measured 2026-10-19 — a controller-spawned worker
+// failed with exactly that while the same launcher in a plain pane authenticated as Claude Max,
+// and a dummy value in the caller's environment alone flipped the pane to API billing.
+//
+// A caller-supplied environment still reaches the worker: it travels in the tab's command line
+// via tabCommand, not through this process's environment.
+var workerCredentialEnvNames = []string{"ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_API_KEY="}
+
+// envWithoutCredentials drops the variables listed in workerCredentialEnvNames.
+func envWithoutCredentials(env []string) []string {
+	entries := make([]string, 0, len(env))
+	for _, entry := range env {
+		if hasAnyPrefix(entry, workerCredentialEnvNames) {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// hasAnyPrefix reports whether s starts with one of prefixes.
+func hasAnyPrefix(s string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // weztermSocketName matches the per-GUI socket files WezTerm creates, gui-sock-<pid>.
