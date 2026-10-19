@@ -143,6 +143,32 @@ type CreateRequest struct {
 	// Secrets are the credentials the caller asks the controller to resolve and deliver.
 	// Only the TeamVault KEY travels here; the value is resolved controller-side.
 	Secrets []Secret `json:"secrets,omitempty"`
+	// Vault names the vault-cli vault the task lives in. Empty means the backend's own
+	// configured vault. Only the
+	// local backend reads it: a named vault decides which task file the launcher and role are
+	// read from, the directory the tab starts in, and the vault the session binding is written
+	// to. An unknown name is refused before any worker is started.
+	Vault string `json:"vault,omitempty"`
+	// FirstStep is a message the worker is told BEFORE its work prompt, prepended to it as
+	// `<first_step>\n\n<work prompt>` — the supervisor's `--first-step`. Empty sends the work
+	// prompt alone. Only the local backend reads it.
+	FirstStep string `json:"first_step,omitempty"`
+}
+
+// Bind reports what a create did to bind the worker's session to its task, mirroring the
+// supervisor's spawn reply.
+//
+// ⚠️ A NIL Bind ON THE REPLY IS NOT A FAILURE, AND IT IS DISTINCT FROM A Bind CARRYING AN ERROR.
+// nil means no session registered under the worker's tab name within the bind window, so there
+// was nothing to bind; a non-nil Bind with Error set means a session was found and the write
+// failed. Neither fails the create, because the worker is already running by then.
+type Bind struct {
+	// Action is `stamped` when the task had no claude_session_id and this session became its
+	// owner, or `appended` when the task already had one, which was left alone, and this session
+	// was appended to its metrics sessions. Empty when Error is set.
+	Action string `json:"action,omitempty"`
+	// Error names why a found session could not be bound.
+	Error string `json:"error,omitempty"`
 }
 
 // CreateResponse is the reply to a create. It is the only place a worker's token is ever
@@ -171,6 +197,9 @@ type CreateResponse struct {
 	// and the vault's own claude_script was used. It is what makes a silently-ignored field
 	// visible from the reply, rather than only from a worker that came up on the wrong model.
 	LauncherSource string `json:"launcher_source"`
+	// Bind is the session binding's outcome — see Bind for what nil means. Always nil for a
+	// backend that starts no Claude Code session of its own on this host.
+	Bind *Bind `json:"bind,omitempty"`
 }
 
 // ListResponse is the reply to a list.

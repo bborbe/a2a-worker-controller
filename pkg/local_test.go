@@ -332,12 +332,13 @@ var _ = Describe("LocalBackend", func() {
 		// The backend is handed the wrapper, so every spec exercises the same code path a
 		// failing store would take while the real store still holds the state it asserts on.
 		failing = &fakeWorkerStore{inner: store}
-		backend = pkg.NewLocalBackend(client, failing, pkg.LocalConfig{
+		resetBindSeams()
+		backend = pkg.NewLocalBackend(client, failing, bindSeams(pkg.LocalConfig{
 			VaultDir:      vault,
 			ClaudeScript:  testClaudeScript,
 			LivenessFloor: testLivenessFloor,
 			RoleMapPath:   roleMapPath,
-		})
+		}))
 	})
 
 	// writeTask puts a task file in the vault, so the backend's session-id read has something
@@ -490,10 +491,10 @@ var _ = Describe("LocalBackend", func() {
 		// value could not fail while it was unchanged. This runs the real default against a
 		// launcher dying at ~1.2 s — inside the shipped floor, where a zero-wait read passes.
 		It("catches a launcher that dies a second after spawn, at the shipped floor", func() {
-			unconfigured := pkg.NewLocalBackend(client, failing, pkg.LocalConfig{
+			unconfigured := pkg.NewLocalBackend(client, failing, bindSeams(pkg.LocalConfig{
 				VaultDir:     vault,
 				ClaudeScript: testClaudeScript,
-			})
+			}))
 			client.paneDeathAfter = 1200 * time.Millisecond
 
 			response, err := unconfigured.Create(ctx, pkg.CreateRequest{Task: task})
@@ -821,13 +822,13 @@ var _ = Describe("LocalBackend", func() {
 		// spawn carries. That is the fallback path rather than the ordinary one — see the Role
 		// resolution specs for the window a resolved role produces.
 		It("opens the tab in the configured window", func() {
-			windowed := pkg.NewLocalBackend(client, failing, pkg.LocalConfig{
+			windowed := pkg.NewLocalBackend(client, failing, bindSeams(pkg.LocalConfig{
 				VaultDir:      vault,
 				ClaudeScript:  testClaudeScript,
 				WindowID:      "7",
 				LivenessFloor: testLivenessFloor,
 				RoleMapPath:   roleMapPath,
-			})
+			}))
 
 			_, err := windowed.Create(ctx, pkg.CreateRequest{Task: task})
 
@@ -1306,13 +1307,13 @@ var _ = Describe("LocalBackend", func() {
 			// ⚠️ testLivenessFloor IS CONFIGURED HERE LIKE EVERY OTHER SPEC. Leaving it out does not
 			// fail — it silently pays the shipped 1500ms default, so this one spec costs the suite
 			// more than the rest of the file combined.
-			windowed := pkg.NewLocalBackend(client, failing, pkg.LocalConfig{
+			windowed := pkg.NewLocalBackend(client, failing, bindSeams(pkg.LocalConfig{
 				VaultDir:      vault,
 				ClaudeScript:  testClaudeScript,
 				WindowID:      "7",
 				LivenessFloor: testLivenessFloor,
 				RoleMapPath:   roleMapPath,
-			})
+			}))
 
 			response, err := windowed.Create(ctx, pkg.CreateRequest{Task: task})
 
@@ -1995,6 +1996,5 @@ var _ = Describe("LocalBackend", func() {
 			Expect(workers[0].SessionID).To(Equal("session-of-this-worker"))
 			Expect(workers[0].CreateSessionID).To(Equal("session-of-an-earlier-worker"))
 		})
-
 	})
 })

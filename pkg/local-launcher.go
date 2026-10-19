@@ -117,8 +117,8 @@ type taskFrontmatter struct {
 // a create that can never succeed. The third read, the session-id baseline, already treats it the
 // same way (see taskSessionID), so all three agree. The warning names the task, so the degradation
 // is visible rather than silent.
-func readTaskFrontmatter(ctx context.Context, vaultDir string, task TaskName) taskFrontmatter {
-	path := filepath.Join(expandHome(vaultDir), DefaultLocalTasksDir, string(task)+".md")
+func readTaskFrontmatter(ctx context.Context, vault LocalVault, task TaskName) taskFrontmatter {
+	path := filepath.Join(expandHome(vault.Dir), vault.tasksDir(), string(task)+".md")
 	//nolint:gosec // G304: the controller's own configured vault plus a name validateTaskName accepted
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -279,12 +279,17 @@ var safeChip = regexp.MustCompile(`^[A-Za-z0-9 _-]+$`)
 // a recorded worker whose pane is already gone. Neither read is fatal on its own — a file that
 // cannot be read degrades to the documented defaults — so this refuses only a value it can see is
 // wrong.
+//
+// ⚠️ EVERY READ IS AGAINST THE CREATE'S RESOLVED VAULT, NEVER THE CONFIGURED ONE. A task in another
+// vault has its launcher, role and goals in THAT vault's files; reading the configured vault would
+// find no file there, degrade silently to the defaults, and open the worker on the wrong launcher.
 func (b *localBackend) resolveTask(
 	ctx context.Context,
+	vault LocalVault,
 	task TaskName,
 ) (resolvedLauncher, resolvedRole, error) {
-	frontmatter := readTaskFrontmatter(ctx, b.config.VaultDir, task)
-	chosen, err := b.launcherFor(ctx, frontmatter)
+	frontmatter := readTaskFrontmatter(ctx, vault, task)
+	chosen, err := b.launcherFor(ctx, vault, frontmatter)
 	if err != nil {
 		return resolvedLauncher{}, resolvedRole{}, err
 	}
@@ -299,9 +304,10 @@ func (b *localBackend) resolveTask(
 // backend will not run.
 func (b *localBackend) launcherFor(
 	ctx context.Context,
+	vault LocalVault,
 	frontmatter taskFrontmatter,
 ) (resolvedLauncher, error) {
-	chosen, err := b.chooseLauncher(ctx, frontmatter)
+	chosen, err := b.chooseLauncher(ctx, vault, frontmatter)
 	if err != nil {
 		return resolvedLauncher{}, err
 	}
@@ -339,34 +345,35 @@ func (b *localBackend) launcherFor(
 // executability check and a different one to the tab's `exec` — see that function.
 func (b *localBackend) chooseLauncher(
 	ctx context.Context,
+	vault LocalVault,
 	frontmatter taskFrontmatter,
 ) (resolvedLauncher, error) {
 	if own := strings.TrimSpace(frontmatter.Launcher); own != "" {
-		path, err := launcherPath(ctx, b.config.ClaudeScript, own)
+		path, err := launcherPath(ctx, vault.ClaudeScript, own)
 		if err != nil {
 			return resolvedLauncher{}, err
 		}
 		return resolvedLauncher{
-			Path:   b.absoluteLauncher(expandHome(path)),
+			Path:   absoluteLauncher(vault.Dir, expandHome(path)),
 			Source: launcherSourceTask,
 		}, nil
 	}
-	fromGoals, err := b.goalLauncher(ctx, frontmatter.Goals)
+	fromGoals, err := b.goalLauncher(ctx, vault, frontmatter.Goals)
 	if err != nil {
 		return resolvedLauncher{}, err
 	}
 	if fromGoals != "" {
-		path, err := launcherPath(ctx, b.config.ClaudeScript, fromGoals)
+		path, err := launcherPath(ctx, vault.ClaudeScript, fromGoals)
 		if err != nil {
 			return resolvedLauncher{}, err
 		}
 		return resolvedLauncher{
-			Path:   b.absoluteLauncher(expandHome(path)),
+			Path:   absoluteLauncher(vault.Dir, expandHome(path)),
 			Source: launcherSourceGoal,
 		}, nil
 	}
 	return resolvedLauncher{
-		Path:   b.absoluteLauncher(expandHome(b.config.ClaudeScript)),
+		Path:   absoluteLauncher(vault.Dir, expandHome(vault.ClaudeScript)),
 		Source: launcherSourceVault,
 	}, nil
 }
@@ -386,11 +393,11 @@ func (b *localBackend) chooseLauncher(
 //
 // The vault directory is the right base because it is the directory the tab `cd`s into, so it is
 // the one the exec itself uses.
-func (b *localBackend) absoluteLauncher(path string) string {
+func absoluteLauncher(vaultDir string, path string) string {
 	if filepath.IsAbs(path) {
 		return path
 	}
-	return filepath.Join(expandHome(b.config.VaultDir), path)
+	return filepath.Join(expandHome(vaultDir), path)
 }
 
 // goalLauncher returns the single launcher the task's goals name, or the empty string when none of
@@ -405,15 +412,19 @@ func (b *localBackend) absoluteLauncher(path string) string {
 // normal vault state — a goal renamed or archived while a task still links it — and refusing on one
 // would stop every task carrying it from opening at all. The supervisor's own reader
 // (server/task-launcher.mjs) applies the same rule.
-func (b *localBackend) goalLauncher(ctx context.Context, names []string) (string, error) {
+func (b *localBackend) goalLauncher(
+	ctx context.Context,
+	vault LocalVault,
+	names []string,
+) (string, error) {
 	if len(names) == 0 {
 		return "", nil
 	}
-	goalsDir := b.goalsDir(ctx)
+	goalsDir := goalsDirFor(ctx, vault.Dir)
 	seen := make(map[string]bool, len(names))
 	values := make([]string, 0, len(names))
 	for _, name := range names {
-		value, err := readGoalLauncher(ctx, b.config.VaultDir, goalsDir, name)
+		value, err := readGoalLauncher(ctx, vault.Dir, goalsDir, name)
 		if err != nil {
 			slog.Warn("goal skipped for launcher resolution", "goal", name, "error", err)
 			continue
@@ -426,7 +437,7 @@ func (b *localBackend) goalLauncher(ctx context.Context, names []string) (string
 		// supervisor's resolver uses, and it is what makes the refusal name the real problem: a task
 		// with two goals, one of them `../evil`, is a task that tried to exec outside the launcher
 		// directory, not a task with an ambiguous launcher.
-		if _, err := launcherPath(ctx, b.config.ClaudeScript, value); err != nil {
+		if _, err := launcherPath(ctx, vault.ClaudeScript, value); err != nil {
 			return "", err
 		}
 		seen[value] = true
@@ -591,24 +602,24 @@ func requireExecutableLauncher(ctx context.Context, path string) error {
 // and one where neither candidate exists is still returned as resolved — with the warning the only
 // signal — because a spec or a partially-populated vault must not lose the goal rule to an absent
 // directory.
-func (b *localBackend) goalsDir(ctx context.Context) string {
-	dir, err := vaultGoalsDir(ctx, b.config.VaultDir)
+func goalsDirFor(ctx context.Context, vaultDir string) string {
+	dir, err := vaultGoalsDir(ctx, vaultDir)
 	if err != nil {
 		slog.Warn(
 			"resolve the vault's goals directory failed; falling back to the default",
-			"vault", b.config.VaultDir,
+			"vault", vaultDir,
 			"goals_dir", DefaultLocalGoalsDir,
 			"error", err,
 		)
 		return DefaultLocalGoalsDir
 	}
-	if vaultDirHasDir(b.config.VaultDir, dir) {
+	if vaultDirHasDir(vaultDir, dir) {
 		return dir
 	}
-	if vaultDirHasDir(b.config.VaultDir, DefaultLocalGoalsDir) {
+	if vaultDirHasDir(vaultDir, DefaultLocalGoalsDir) {
 		slog.Warn(
 			"the vault's configured goals directory does not exist; falling back to the default",
-			"vault", b.config.VaultDir,
+			"vault", vaultDir,
 			"goals_dir", dir,
 			"fallback", DefaultLocalGoalsDir,
 		)
@@ -617,7 +628,7 @@ func (b *localBackend) goalsDir(ctx context.Context) string {
 	slog.Warn(
 		"the vault's configured goals directory does not exist and neither does the default; "+
 			"the goal rule will find nothing",
-		"vault", b.config.VaultDir,
+		"vault", vaultDir,
 		"goals_dir", dir,
 		"fallback", DefaultLocalGoalsDir,
 	)

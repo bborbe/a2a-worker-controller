@@ -12,6 +12,7 @@ require (
 	github.com/bborbe/run v1.10.2
 	github.com/bborbe/sentry v1.10.1
 	github.com/bborbe/service v1.10.11
+	github.com/bborbe/time v1.27.12
 	github.com/bborbe/vault-cli v0.121.0
 	github.com/gorilla/mux v1.8.1
 	github.com/onsi/ginkgo/v2 v2.32.1
@@ -31,7 +32,6 @@ require (
 	github.com/bborbe/kv v1.21.13 // indirect
 	github.com/bborbe/math v1.4.8 // indirect
 	github.com/bborbe/parse v1.11.1 // indirect
-	github.com/bborbe/time v1.27.12 // indirect
 	github.com/bborbe/validation v1.4.23 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

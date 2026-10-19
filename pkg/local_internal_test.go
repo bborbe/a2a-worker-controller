@@ -221,6 +221,7 @@ var _ = Describe("local backend internals", func() {
 				"/bin/cc",
 				map[string]string{"B_TOKEN": "s3cr3t", "A_URL": "http://x"},
 				"My Task",
+				"",
 			)
 
 			Expect(command).To(Equal(
@@ -231,7 +232,7 @@ var _ = Describe("local backend internals", func() {
 		})
 
 		It("renders no export at all when the caller supplied no environment", func() {
-			command := tabCommand("/vault", "/bin/cc", nil, "t")
+			command := tabCommand("/vault", "/bin/cc", nil, "t", "")
 
 			Expect(command).To(HavePrefix("cd '/vault'"))
 		})
@@ -240,7 +241,7 @@ var _ = Describe("local backend internals", func() {
 		// POINT OF THE CHANGE: the vault launcher used to be read from the config in here, which is
 		// how every tab came up on the vault default however the task was declared.
 		It("execs the launcher it was handed rather than a configured one", func() {
-			command := tabCommand("/vault", "/scripts/cc-private-claude", nil, "t")
+			command := tabCommand("/vault", "/scripts/cc-private-claude", nil, "t", "")
 
 			Expect(command).To(ContainSubstring("exec '/scripts/cc-private-claude'"))
 			Expect(command).NotTo(ContainSubstring("cc-private'"))
@@ -250,9 +251,18 @@ var _ = Describe("local backend internals", func() {
 			home, err := os.UserHomeDir()
 			Expect(err).To(BeNil())
 
-			command := tabCommand("~/vault", "/bin/cc", nil, "t")
+			command := tabCommand("~/vault", "/bin/cc", nil, "t", "")
 
 			Expect(command).To(ContainSubstring("cd '" + filepath.Join(home, "vault") + "'"))
+		})
+		// The first step leads, a blank line separates it, and the work prompt follows — all of it
+		// one single-quoted argv element, so a quote inside the first step is quoted, not syntax.
+		It("prepends the first step to the work prompt, separated by a blank line", func() {
+			command := tabCommand("/vault", "/bin/cc", nil, "t", "read the guide's")
+
+			Expect(command).To(HaveSuffix(
+				` 'read the guide'\''s` + "\n\n" + `/vault-cli:work-on-task "t"'`,
+			))
 		})
 	})
 
@@ -902,11 +912,9 @@ var _ = Describe("local backend internals", func() {
 		// never a create. A wrong one is not a visible failure — it just means the worker opens on
 		// the vault default, which is the silent drop this change exists to remove.
 		It("falls back to the default when no vault-cli entry names the vault", func() {
-			backend := &localBackend{
-				config: LocalConfig{VaultDir: filepath.Join(GinkgoT().TempDir(), "absent")},
-			}
+			absent := filepath.Join(GinkgoT().TempDir(), "absent")
 
-			Expect(backend.goalsDir(context.Background())).To(Equal(DefaultLocalGoalsDir))
+			Expect(goalsDirFor(context.Background(), absent)).To(Equal(DefaultLocalGoalsDir))
 		})
 	})
 
