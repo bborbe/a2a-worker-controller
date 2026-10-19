@@ -114,6 +114,35 @@ var _ = Describe("local backend internals", func() {
 		})
 	})
 
+	Describe("envWithoutCredentials", func() {
+		// ⚠️ LOAD-BEARING: `wezterm cli spawn` propagates THIS process's environment into the
+		// new pane, so an inherited ANTHROPIC_AUTH_TOKEN overrides the worker launcher's
+		// subscription login — Claude Code then authenticates as an API key and every turn
+		// fails with `401 Invalid bearer token`.
+		It("drops both Anthropic credential variables and keeps everything else", func() {
+			env := envWithoutCredentials([]string{
+				"PATH=/bin",
+				"ANTHROPIC_AUTH_TOKEN=leaked",
+				"HOME=/home/u",
+				"ANTHROPIC_API_KEY=leaked",
+			})
+
+			Expect(env).To(Equal([]string{"PATH=/bin", "HOME=/home/u"}))
+		})
+
+		// The `=` in the prefix is what keeps this honest: a longer variable that merely shares
+		// the name is not a credential and must survive.
+		It("keeps a variable that only shares the prefix", func() {
+			Expect(envWithoutCredentials([]string{"ANTHROPIC_AUTH_TOKEN_BACKUP=x"})).To(Equal(
+				[]string{"ANTHROPIC_AUTH_TOKEN_BACKUP=x"},
+			))
+		})
+
+		It("returns the environment unchanged when it carries neither", func() {
+			Expect(envWithoutCredentials([]string{"PATH=/bin"})).To(Equal([]string{"PATH=/bin"}))
+		})
+	})
+
 	Describe("parsePaneIDs", func() {
 		It("reads pane ids out of the json list and renders them as strings", func() {
 			ids, err := parsePaneIDs(
