@@ -267,6 +267,21 @@ running against, so address a worker by its `worker_id` and let the controller r
 The state file is single-writer: `save` replaces it wholesale, so one file belongs to exactly one
 controller.
 
+### Worker tokens
+
+A worker's bearer token is minted at `create` and returned in the create reply — never in a
+`list` response, a log line or a supervisor record. The controller also keeps a copy so a
+repeated `create` for the same task answers with the same worker and its token
+(`reused: true`) instead of refusing. That copy lives at
+`~/.local/state/a2a-worker-controller/docker-workers.json`, written `0600` in a `0750`
+directory, and its entry is removed when the worker is stopped.
+
+⚠️ **This is a deliberate security trade: the token moves from memory-only to at rest.**
+Before it, a second `create` for a task that already had a worker could only refuse, and the
+refusal forced every caller into stop-then-recreate — which is how orphans were produced. A
+worker whose token cannot be persisted is removed rather than left running, so a failed store
+write cannot strand a worker nobody can authenticate to.
+
 ## Development
 
 `example.env` holds the local development defaults. `make precommit` runs format, generate,

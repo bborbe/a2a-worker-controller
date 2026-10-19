@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: a repeated `create` for a task that already has a worker returns that worker and its token with `reused: true` instead of refusing. The controller now keeps each worker's bearer token in a `0600` JSON store (`~/.local/state/a2a-worker-controller/docker-workers.json`, written into a `0750` directory and removed when the worker is stopped), which is what makes the retry answerable: before, the token existed only in the create reply, so a spawn that timed out after the container started left a worker whose token the caller never received, and a blind retry hit a refusal that forced stop-then-recreate — the orphan path. ⚠️ **This is a deliberate security trade: the token moves from memory-only to at rest.** The token still never reaches a `list` response, a log line or a supervisor record. A worker whose token cannot be persisted is removed rather than left running, so a failed store write cannot strand a worker nobody can authenticate to; a worker created before the store existed still refuses by id, keeping the stop-then-create recovery reachable.
+
 ## v0.15.1
 
 - fix: the `local` backend no longer leaks its own Anthropic credentials into a worker's tab. `wezterm cli spawn` propagates the calling process's environment into the new pane, and the controller's wrapper exports `ANTHROPIC_AUTH_TOKEN` for the **docker** backend — so every locally spawned worker inherited it, Claude Code switched from the launcher's subscription login to API-key auth, and `api.anthropic.com` answered `401 Invalid bearer token` on every turn. The spawn path now drops `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY` from the environment it hands to `wezterm cli spawn` (`envWithoutCredentials`); every other variable, and a caller-supplied `env` — which travels in the tab's command line rather than this process's environment — is unchanged.

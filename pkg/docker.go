@@ -123,6 +123,11 @@ type DockerConfig struct {
 	// in it holds a credential, and one controller's workers must never be able to read
 	// another's.
 	SecretDir string
+	// TokenStore keeps each worker's bearer token so a repeated create can return the live
+	// worker with a token that authenticates. Nil disables persistence: a task that already has
+	// a worker is then refused exactly as before, because the controller holds no token to hand
+	// back. The binary always supplies one; nil exists for tests that do not exercise reuse.
+	TokenStore TokenStore
 }
 
 // DefaultDockerConfig is the configuration the controller uses when none is supplied. Its
@@ -254,13 +259,13 @@ func NewDockerBackend(client DockerClient, prober PortProber, config DockerConfi
 // Create starts one worker container for the requested task and returns it with its own
 // freshly minted bearer token.
 //
-// ⚠️ A TASK THAT ALREADY HAS A CONTAINER IS REFUSED, NOT ANSWERED. Only one worker is ever
-// started per task, but that worker's token cannot be returned — the controller kept no copy
-// of it — so a success reply would name a worker no caller could authenticate to: it reads as
-// a working worker while being unreachable, and the caller has nothing to reap it with. The
-// refusal carries the existing worker's id instead, which is what makes the caller's own
-// recovery — stop that worker, then create another — possible. That recovery stays on the
-// caller by contract; this method only has to make it reachable.
+// ⚠️ A TASK THAT ALREADY HAS A CONTAINER IS ANSWERED WITH IT, NOT STARTED TWICE. Only one
+// worker is ever started per task, so a second create finds the existing container, reads its
+// stored token and returns the same worker with Reused set. That is what makes a retried spawn
+// recover the live worker instead of reaping and recreating it — the orphan path the token
+// store exists to close. A worker whose token the store does not hold (created before the store
+// existed, or one whose entry was lost) is still refused by id, which keeps the caller's
+// stop-then-create recovery reachable.
 func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateResponse, error) {
 	b.mutex.Lock()
 	defer b.mutex.Unlock()
@@ -287,19 +292,7 @@ func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateR
 		return nil, err
 	}
 	if existing := findContainerByTask(containers, req.Task); existing != nil {
-		// ⚠️ THE WORKER ID IS THE POINT OF THIS ERROR, NOT DECORATION. It is the only handle a
-		// caller gets on a container it cannot authenticate to, and `stop` resolves ownership
-		// from that id alone — so naming it is what turns an unreachable worker into a reaped
-		// one. An error without it would leave the caller exactly as stuck as the empty-token
-		// reply this replaces, only with a worse failure mode: a refusal that says nothing
-		// actionable.
-		return nil, errors.Errorf(
-			ctx,
-			"task %q already has worker %q, whose token this controller did not keep; "+
-				"stop that worker and create another",
-			req.Task,
-			existing.WorkerID,
-		)
+		return b.reuseExistingWorker(ctx, existing)
 	}
 
 	port, err := b.freePort(ctx)
@@ -339,6 +332,18 @@ func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateR
 		return nil, errors.Wrap(ctx, err, "create worker container failed")
 	}
 
+	// ⚠️ PERSISTED BEFORE THE REPLY IS RETURNED, AND A FAILURE REAPS THE CONTAINER. A worker
+	// whose token could not be stored is exactly the orphan this change exists to remove: it
+	// runs, the caller holds a token it may lose, and a retry would find the container and
+	// refuse. Removing it keeps the failure honest — the create reports an error and no worker
+	// is left behind. Cleanup failures are reported alongside the cause rather than replacing
+	// it, because the persist error is the one the operator can act on.
+	if err := b.persistToken(ctx, workerID, token); err != nil {
+		_ = b.removeContainer(ctx, workerID)
+		_ = RemoveSecretFiles(ctx, b.config.SecretDir, workerID)
+		return nil, errors.Wrapf(ctx, err, "persist token for worker %q failed", workerID)
+	}
+
 	return &CreateResponse{
 		Worker: Worker{
 			WorkerID: workerID,
@@ -349,6 +354,72 @@ func (b *dockerBackend) Create(ctx context.Context, req CreateRequest) (*CreateR
 		},
 		Token: token,
 	}, nil
+}
+
+// reuseExistingWorker answers a create whose task already has a container: the existing worker
+// and its stored token, or the refusal naming that worker when no token is stored.
+//
+// ⚠️ A STORED TOKEN IS WHAT TURNS THIS FROM A REFUSAL INTO A REUSE. The container is already
+// running and its id is stable across restarts (it is read back from the container's own
+// label), so the only thing a retried create lacked was the credential. Returning that
+// credential is the whole fix: the caller recovers the live worker instead of reaping it, and a
+// spawn that timed out after create no longer orphans a worker whose token it never received.
+func (b *dockerBackend) reuseExistingWorker(
+	ctx context.Context,
+	existing *dockerContainer,
+) (*CreateResponse, error) {
+	token, err := b.storedToken(ctx, existing.WorkerID)
+	if err != nil {
+		return nil, err
+	}
+	if token == "" {
+		// ⚠️ THE WORKER ID IS THE POINT OF THIS ERROR, NOT DECORATION. It is the only handle a
+		// caller gets on a container it cannot authenticate to, and `stop` resolves ownership
+		// from that id alone — so naming it is what turns an unreachable worker into a reaped
+		// one. This branch now covers only a worker created before the store existed, or one
+		// whose entry was lost; the ordinary retry is answered above.
+		return nil, errors.Errorf(
+			ctx,
+			"task %q already has worker %q, whose token this controller does not hold; "+
+				"stop that worker and create another",
+			existing.Task,
+			existing.WorkerID,
+		)
+	}
+	worker := existing.worker()
+	return &CreateResponse{Worker: worker, Token: token, Reused: true}, nil
+}
+
+// storedToken returns the token the store holds for workerID, or the empty string when no
+// store is configured or no entry is stored. An absent entry is not an error: it means this
+// worker cannot be handed back, which the caller turns into the refusal naming its id.
+func (b *dockerBackend) storedToken(ctx context.Context, workerID WorkerID) (string, error) {
+	if b.config.TokenStore == nil {
+		return "", nil
+	}
+	return b.config.TokenStore.Get(ctx, workerID)
+}
+
+// persistToken records the token minted for a worker that has just started.
+func (b *dockerBackend) persistToken(
+	ctx context.Context,
+	workerID WorkerID,
+	token string,
+) error {
+	if b.config.TokenStore == nil {
+		return nil
+	}
+	return b.config.TokenStore.Put(ctx, workerID, token)
+}
+
+// removeContainer force-removes the container a worker id names. It runs only on a path where
+// the create is about to fail, so a failure to remove is reported to the caller rather than
+// retried — the caller is already being told the create failed.
+func (b *dockerBackend) removeContainer(ctx context.Context, workerID WorkerID) error {
+	if _, err := b.client.Run(ctx, []string{"rm", "-f", containerName(workerID)}, nil); err != nil {
+		return errors.Wrapf(ctx, err, "remove worker container %q failed", containerName(workerID))
+	}
+	return nil
 }
 
 // List returns every worker container this controller owns, rebuilt from the daemon on every
@@ -384,6 +455,18 @@ func (b *dockerBackend) Stop(ctx context.Context, req StopRequest) (*StopRespons
 	}
 	if _, err := b.client.Run(ctx, []string{"rm", container.Name}, nil); err != nil {
 		return nil, errors.Wrap(ctx, err, "remove worker container failed")
+	}
+	// The container is gone, so its token has no reader either. Deleting the entry is what
+	// keeps the store from accumulating credentials for workers that no longer exist.
+	if b.config.TokenStore != nil {
+		if err := b.config.TokenStore.Delete(ctx, container.WorkerID); err != nil {
+			return nil, errors.Wrapf(
+				ctx,
+				err,
+				"delete token for worker %q failed",
+				container.WorkerID,
+			)
+		}
 	}
 	// The container is gone, so its secret files have no reader and are removed here — the one
 	// place that knows a worker is finished. After the container rather than before: the mounts

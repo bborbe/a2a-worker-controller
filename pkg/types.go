@@ -11,8 +11,8 @@ package pkg
 type WorkerID string
 
 // TaskName is the vault task a worker serves. It names the work, not the worker — a task
-// has at most one worker, and a second create for a task that already has one is REFUSED,
-// naming that worker, rather than answered with it.
+// has at most one worker, and a second create for a task that already has one returns that
+// worker with its stored token (`reused: true`) rather than starting a second one.
 type TaskName string
 
 // Backend names the implementation that serves workers. Its value space belongs to the
@@ -51,8 +51,9 @@ const (
 )
 
 // Worker is one worker as the control API reports it. It deliberately carries no token: a
-// worker's token is returned once by create and never again, so no listing, no log and no
-// restart can leak one.
+// worker's token is returned only by create, so no listing, no log and no restart can leak
+// one. The controller does keep a copy — that is what makes a repeated create able to hand the
+// token back — but the copy lives in the backend's token store, never in this shape.
 //
 // ⚠️ PaneID AND SessionID ARE A DELIBERATE WIDENING OF THIS SHARED SCHEMA. What this file
 // keeps out is a backend's IDENTITY: no backend is named here, so a second backend does not
@@ -171,9 +172,11 @@ type Bind struct {
 	Error string `json:"error,omitempty"`
 }
 
-// CreateResponse is the reply to a create. It is the only place a worker's token is ever
-// returned: the controller keeps no copy it depends on, so a caller that loses this reply
-// stops the worker and creates another rather than asking the controller to repeat it.
+// CreateResponse is the reply to a create, and the only place a worker's token is ever
+// returned. A caller that loses this reply creates again for the same task: the task already
+// has a worker, so that create starts nothing, returns the SAME worker and its stored token,
+// and sets Reused — which is what makes a retried spawn recover the live worker instead of
+// reaping and recreating it.
 //
 // ⚠️ Launcher AND LauncherSource ARE A DELIBERATE WIDENING OF THIS SHARED SCHEMA, on the same
 // terms as Worker's PaneID and SessionID. What this file keeps out is a backend's IDENTITY — no
@@ -186,8 +189,14 @@ type Bind struct {
 // different question.
 type CreateResponse struct {
 	Worker Worker `json:"worker"`
+	// Reused reports that this create started nothing: the task already had a worker, and the
+	// reply names that worker and its stored token. False means a worker was started by this
+	// call. A caller that only wants to know whether it owns a fresh worker reads this rather
+	// than comparing worker ids.
+	Reused bool `json:"reused,omitempty"`
 	// Token is the worker's own bearer credential. It must never be logged, echoed into a
-	// transcript, or written to a file.
+	// transcript, or written anywhere except the backend's own 0600 token store — the one
+	// place it is at rest, and the reason a repeated create can return it.
 	Token string `json:"token"`
 	// Launcher is the script the worker was started with. Empty for a backend that starts no
 	// command — a container or a pod runs an image, not a launcher.
