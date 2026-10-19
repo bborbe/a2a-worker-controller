@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/bborbe/a2a-worker-controller/mocks"
 	"github.com/bborbe/a2a-worker-controller/pkg"
 )
 
@@ -69,46 +70,6 @@ type fakePortProber struct {
 func (f *fakePortProber) IsFree(_ context.Context, port int) bool {
 	f.asked = append(f.asked, port)
 	return !f.taken[port]
-}
-
-// fakeTokenStore is an in-memory TokenStore. It records what a create persisted and what a
-// stop removed, so a spec asserts the backend's store calls without a file on disk.
-type fakeTokenStore struct {
-	tokens map[pkg.WorkerID]string
-	putErr error
-	getErr error
-	delErr error
-}
-
-func newFakeTokenStore() *fakeTokenStore {
-	return &fakeTokenStore{tokens: map[pkg.WorkerID]string{}}
-}
-
-func (f *fakeTokenStore) Get(_ context.Context, workerID pkg.WorkerID) (string, error) {
-	if f.getErr != nil {
-		return "", f.getErr
-	}
-	return f.tokens[workerID], nil
-}
-
-func (f *fakeTokenStore) Put(
-	_ context.Context,
-	workerID pkg.WorkerID,
-	token string,
-) error {
-	if f.putErr != nil {
-		return f.putErr
-	}
-	f.tokens[workerID] = token
-	return nil
-}
-
-func (f *fakeTokenStore) Delete(_ context.Context, workerID pkg.WorkerID) error {
-	if f.delErr != nil {
-		return f.delErr
-	}
-	delete(f.tokens, workerID)
-	return nil
 }
 
 // configWithStore is the default docker config with a token store attached.
@@ -437,8 +398,8 @@ var _ = Describe("DockerBackend", func() {
 		})
 
 		It("returns the existing worker and its stored token with reused set", func() {
-			store := newFakeTokenStore()
-			store.tokens[workerID] = "stored-token"
+			store := &mocks.PkgTokenStore{}
+			store.GetReturns("stored-token", nil)
 			client := &fakeDockerClient{
 				stdout: []string{psLine(name, workerID, task, ports)},
 			}
@@ -457,7 +418,7 @@ var _ = Describe("DockerBackend", func() {
 		})
 
 		It("persists the token it minted, so a later create can hand it back", func() {
-			store := newFakeTokenStore()
+			store := &mocks.PkgTokenStore{}
 			client := &fakeDockerClient{stdout: []string{"", ""}}
 			backend := pkg.NewDockerBackend(client, &fakePortProber{}, configWithStore(store))
 
@@ -465,12 +426,15 @@ var _ = Describe("DockerBackend", func() {
 
 			Expect(err).To(BeNil())
 			Expect(response.Reused).To(BeFalse())
-			Expect(store.tokens[response.Worker.WorkerID]).To(Equal(response.Token))
+			Expect(store.PutCallCount()).To(Equal(1))
+			_, storedWorkerID, storedToken := store.PutArgsForCall(0)
+			Expect(storedWorkerID).To(Equal(response.Worker.WorkerID))
+			Expect(storedToken).To(Equal(response.Token))
 		})
 
 		It("reaps the container when the token cannot be persisted", func() {
-			store := newFakeTokenStore()
-			store.putErr = errTokenStore
+			store := &mocks.PkgTokenStore{}
+			store.PutReturns(errTokenStore)
 			client := &fakeDockerClient{stdout: []string{"", "", ""}}
 			backend := pkg.NewDockerBackend(client, &fakePortProber{}, configWithStore(store))
 
@@ -601,8 +565,7 @@ var _ = Describe("DockerBackend", func() {
 		})
 
 		It("deletes the stored token once the container is gone", func() {
-			store := newFakeTokenStore()
-			store.tokens[workerID] = "stored-token"
+			store := &mocks.PkgTokenStore{}
 			client := &fakeDockerClient{
 				stdout: []string{psLine(name, workerID, task, ports), "", ""},
 			}
@@ -611,7 +574,9 @@ var _ = Describe("DockerBackend", func() {
 			_, err := backend.Stop(ctx, pkg.StopRequest{WorkerID: workerID})
 
 			Expect(err).To(BeNil())
-			Expect(store.tokens).NotTo(HaveKey(workerID))
+			Expect(store.DeleteCallCount()).To(Equal(1))
+			_, deletedWorkerID := store.DeleteArgsForCall(0)
+			Expect(deletedWorkerID).To(Equal(workerID))
 		})
 
 		It("refuses a worker id the controller does not own, touching nothing", func() {

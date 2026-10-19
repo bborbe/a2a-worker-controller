@@ -28,6 +28,8 @@ func DefaultTokenStateFile(ctx context.Context) (string, error) {
 	return filepath.Join(home, localStateDir, tokenStateFileName), nil
 }
 
+//counterfeiter:generate -o ../mocks/pkg-token-store.go --fake-name PkgTokenStore . TokenStore
+
 // TokenStore keeps each worker's bearer token so a repeated create can hand back a usable
 // handle instead of refusing.
 //

@@ -442,6 +442,14 @@ func (b *dockerBackend) List(ctx context.Context) (*ListResponse, error) {
 // exist — is refused with an error and left running, so a stop can never touch a container
 // this controller did not create.
 func (b *dockerBackend) Stop(ctx context.Context, req StopRequest) (*StopResponse, error) {
+	// ⚠️ STOP TAKES THE SAME MUTEX CREATE DOES, and the token store is why. Deleting an entry is a
+	// read-modify-write over the file Create writes, so a stop interleaving with a create would
+	// lose one side's update — dropping a freshly minted token (reproducing the orphan this change
+	// exists to prevent) or retaining a stopped worker's. The secret removal below runs under it
+	// for the same reason: it is the other half of the same cleanup.
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+
 	containers, err := b.listContainers(ctx)
 	if err != nil {
 		return nil, err
@@ -456,11 +464,19 @@ func (b *dockerBackend) Stop(ctx context.Context, req StopRequest) (*StopRespons
 	if _, err := b.client.Run(ctx, []string{"rm", container.Name}, nil); err != nil {
 		return nil, errors.Wrap(ctx, err, "remove worker container failed")
 	}
-	// The container is gone, so its token has no reader either. Deleting the entry is what
-	// keeps the store from accumulating credentials for workers that no longer exist.
+	// ⚠️ BOTH CLEANUPS RUN, AND THE TOKEN DELETE IS NOT ALLOWED TO SHORT-CIRCUIT THE SECRETS. The
+	// container is gone, so neither has a reader. Returning on a token-delete failure would leave
+	// credential files on disk for a worker whose container no longer exists — and because the
+	// retried stop then fails the ownership lookup, nothing would ever collect them. The first
+	// failure is the one reported.
+	// The token delete is what keeps the store from accumulating credentials for workers that no
+	// longer exist. The secret removal runs after the container rather than before: the mounts are
+	// held for its lifetime, so a removal that raced the stop would leave a running worker holding
+	// a path that no longer exists.
+	var tokenErr error
 	if b.config.TokenStore != nil {
 		if err := b.config.TokenStore.Delete(ctx, container.WorkerID); err != nil {
-			return nil, errors.Wrapf(
+			tokenErr = errors.Wrapf(
 				ctx,
 				err,
 				"delete token for worker %q failed",
@@ -468,12 +484,12 @@ func (b *dockerBackend) Stop(ctx context.Context, req StopRequest) (*StopRespons
 			)
 		}
 	}
-	// The container is gone, so its secret files have no reader and are removed here — the one
-	// place that knows a worker is finished. After the container rather than before: the mounts
-	// are held for its lifetime, so a removal that raced the stop would leave a running worker
-	// holding a path that no longer exists.
-	if err := RemoveSecretFiles(ctx, b.config.SecretDir, container.WorkerID); err != nil {
-		return nil, err
+	secretErr := RemoveSecretFiles(ctx, b.config.SecretDir, container.WorkerID)
+	if tokenErr != nil {
+		return nil, tokenErr
+	}
+	if secretErr != nil {
+		return nil, secretErr
 	}
 	worker := container.worker()
 	worker.State = WorkerStateStopped
