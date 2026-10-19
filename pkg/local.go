@@ -21,6 +21,7 @@ import (
 	"unicode"
 
 	"github.com/bborbe/errors"
+	libtime "github.com/bborbe/time"
 )
 
 // The local backend's fixed settings.
@@ -133,6 +134,11 @@ type LocalConfig struct {
 	VaultResolver LocalVaultResolver
 	// VaultCLI is what the session binding writes through. Nil uses NewExecVaultCLI.
 	VaultCLI VaultCLI
+	// SessionRegistry reads the session registry the bind polls. Nil uses NewSessionRegistry over
+	// SessionRegistryDir.
+	SessionRegistry SessionRegistry
+	// CurrentDateTimeGetter is the clock the bind window is measured on. Nil uses the real clock.
+	CurrentDateTimeGetter libtime.CurrentDateTimeGetter
 }
 
 // LocalWorker is one worker the local backend owns, as the ownership store records it.
@@ -171,9 +177,9 @@ type LocalWorker struct {
 	//
 	// ⚠️ THEY ARE RECORDED BECAUSE A CREATE MAY NAME A VAULT OTHER THAN THE CONFIGURED ONE, and
 	// refreshSessionIDs must re-read the file THAT worker's task lives in — reading the configured
-	// vault would find no file, and the worker's binding would never be reported. An entry written
-	// before the fields existed carries neither and falls back to the configured vault, which is
-	// the only vault such an entry could have been created in.
+	// vault would find no file, and the worker's binding would never be reported. An entry that
+	// carries neither falls back to the configured vault, the only vault it could have been
+	// created in.
 	VaultDir string `json:"vault_dir,omitempty"`
 	TasksDir string `json:"tasks_dir,omitempty"`
 }
@@ -964,7 +970,7 @@ func workPrompt(task TaskName) string {
 
 // tabPrompt is the whole prompt a worker's tab is started with: the caller's first step, a blank
 // line, then the work prompt — the shape the supervisor's own `--first-step` sends. An empty first
-// step is the work prompt alone, byte for byte what every create sent before the field existed.
+// step is the work prompt alone, byte for byte.
 func tabPrompt(task TaskName, firstStep string) string {
 	if firstStep == "" {
 		return workPrompt(task)
@@ -1203,7 +1209,7 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	// ⚠️ THE TAB NAME'S EXISTING REGISTRY HOLDERS ARE SNAPSHOTTED BEFORE THE SPAWN FOR THE SAME
 	// STRUCTURAL REASON: a holder present before the tab existed cannot be this tab's session, so
 	// the bind can never pick up an earlier, still-live session of the same task.
-	preexisting := sessionIDsNamed(b.sessionRegistryDir(), tabNameFor(req.Task))
+	preexisting := b.sessionRegistry().SessionIDsNamed(tabNameFor(req.Task))
 
 	paneID, err := b.client.Spawn(
 		ctx,
@@ -1277,10 +1283,9 @@ func (b *localBackend) Create(ctx context.Context, req CreateRequest) (*CreateRe
 	// live tab can be orphaned. It is bounded by BindTimeout and never fatal — a session that never
 	// registers is a nil bind and a write that fails is a bind error, both on a successful reply.
 	//
-	// ⚠️ THIS IS WHAT A TAB WORKER NEVER DID BEFORE, AND IT IS WHY ITS SESSION ID STAYED EMPTY. The
-	// binding used to be left to the worker's own session writing the task file, which `claude -n`
-	// sessions may never do; the supervisor's tab path instead joined on the registry by tab name and
-	// wrote the binding itself, and this is that join.
+	// ⚠️ THE BACKEND WRITES THE BINDING ITSELF, BECAUSE A `claude -n` SESSION MAY NEVER WRITE THE TASK
+	// FILE. It joins the pane to its session through the registry by tab name, as the supervisor's
+	// tab path does.
 	bind := b.bindCreatedWorker(ctx, vault, &worker, preexisting)
 	return &CreateResponse{
 		Worker:         worker.worker(),

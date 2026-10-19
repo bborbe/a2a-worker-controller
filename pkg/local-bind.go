@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bborbe/errors"
+	libtime "github.com/bborbe/time"
 	vaultconfig "github.com/bborbe/vault-cli/pkg/config"
 )
 
@@ -81,13 +82,13 @@ type LocalVaultResolver interface {
 // NewVaultCLIConfigResolver creates the LocalVaultResolver backed by vault-cli's config file —
 // the same loader vaultGoalsDir already reads.
 func NewVaultCLIConfigResolver() LocalVaultResolver {
-	return vaultCLIConfigResolver{}
+	return localVaultResolver{}
 }
 
-type vaultCLIConfigResolver struct{}
+type localVaultResolver struct{}
 
 // ResolveName looks the vault up by its vault-cli name.
-func (vaultCLIConfigResolver) ResolveName(ctx context.Context, name string) (LocalVault, error) {
+func (localVaultResolver) ResolveName(ctx context.Context, name string) (LocalVault, error) {
 	vaults, err := vaultconfig.NewLoader("").GetAllVaults(ctx)
 	if err != nil {
 		return LocalVault{}, errors.Wrap(ctx, err, "load vault-cli config failed")
@@ -101,7 +102,7 @@ func (vaultCLIConfigResolver) ResolveName(ctx context.Context, name string) (Loc
 }
 
 // ResolveDir looks the vault up by its path, the same match vaultGoalsDir makes.
-func (vaultCLIConfigResolver) ResolveDir(ctx context.Context, dir string) (LocalVault, error) {
+func (localVaultResolver) ResolveDir(ctx context.Context, dir string) (LocalVault, error) {
 	vaults, err := vaultconfig.NewLoader("").GetAllVaults(ctx)
 	if err != nil {
 		return LocalVault{}, errors.Wrap(ctx, err, "load vault-cli config failed")
@@ -134,13 +135,13 @@ type VaultCLI interface {
 
 // NewExecVaultCLI creates the VaultCLI that execs the `vault-cli` binary.
 func NewExecVaultCLI() VaultCLI {
-	return execVaultCLI{}
+	return vaultCLI{}
 }
 
-type execVaultCLI struct{}
+type vaultCLI struct{}
 
 // Run execs vault-cli with args as argv — never through a shell — and names its stderr on failure.
-func (execVaultCLI) Run(ctx context.Context, args ...string) error {
+func (vaultCLI) Run(ctx context.Context, args ...string) error {
 	var stderr bytes.Buffer
 	//nolint:gosec // G204: argv is fixed verbs plus a validated vault name, task name and session id
 	command := exec.CommandContext(ctx, "vault-cli", args...)
@@ -244,8 +245,8 @@ func (b *localBackend) vaultResolver() LocalVaultResolver {
 	return NewVaultCLIConfigResolver()
 }
 
-// vaultCLI returns the configured vault-cli runner, the real binary when none is set.
-func (b *localBackend) vaultCLI() VaultCLI {
+// vaultCLIRunner returns the configured vault-cli runner, the real binary when none is set.
+func (b *localBackend) vaultCLIRunner() VaultCLI {
 	if b.config.VaultCLI != nil {
 		return b.config.VaultCLI
 	}
@@ -264,6 +265,22 @@ func (b *localBackend) sessionRegistryDir() string {
 	return filepath.Join(home, localSessionRegistryDir)
 }
 
+// sessionRegistry returns the configured session registry, one over sessionRegistryDir when none is set.
+func (b *localBackend) sessionRegistry() SessionRegistry {
+	if b.config.SessionRegistry != nil {
+		return b.config.SessionRegistry
+	}
+	return NewSessionRegistry(b.sessionRegistryDir())
+}
+
+// clock returns the configured clock, the real one when none is set.
+func (b *localBackend) clock() libtime.CurrentDateTimeGetter {
+	if b.config.CurrentDateTimeGetter != nil {
+		return b.config.CurrentDateTimeGetter
+	}
+	return libtime.NewCurrentDateTime()
+}
+
 // registryEntry is the slice of a session registry file this backend reads. The field names are
 // Claude Code's own, as claude-supervisor's server/liveness.mjs reads them.
 //
@@ -275,14 +292,30 @@ type registryEntry struct {
 	Name      string `json:"name"`
 }
 
-// sessionIDsNamed returns every session id the registry currently holds under name, or nil when
-// the directory cannot be read.
-//
-// ⚠️ nil IS "NO INFORMATION", NOT "NOBODY". A file that is foreign or half-written is skipped
-// rather than raised — it is not ours to fail on — and an entry without an integer pid is not a
-// session, exactly as the supervisor's readRegistry treats it.
-func sessionIDsNamed(dir string, name string) map[string]bool {
-	entries, err := os.ReadDir(dir)
+//counterfeiter:generate -o ../mocks/pkg-session-registry.go --fake-name PkgSessionRegistry . SessionRegistry
+
+// SessionRegistry reads Claude Code's session registry.
+type SessionRegistry interface {
+	// SessionIDsNamed returns every session id the registry currently holds under name, or nil
+	// when the registry cannot be read.
+	//
+	// ⚠️ nil IS "NO INFORMATION", NOT "NOBODY". A file that is foreign or half-written is skipped
+	// rather than raised — it is not ours to fail on — and an entry without an integer pid is not
+	// a session, exactly as the supervisor's readRegistry treats it.
+	SessionIDsNamed(name string) map[string]bool
+}
+
+// NewSessionRegistry creates the SessionRegistry that scans the `<pid>.json` files in dir.
+func NewSessionRegistry(dir string) SessionRegistry {
+	return sessionRegistry{dir: dir}
+}
+
+type sessionRegistry struct {
+	dir string
+}
+
+func (r sessionRegistry) SessionIDsNamed(name string) map[string]bool {
+	entries, err := os.ReadDir(r.dir)
 	if err != nil {
 		return nil
 	}
@@ -292,7 +325,7 @@ func sessionIDsNamed(dir string, name string) map[string]bool {
 			continue
 		}
 		//nolint:gosec // G304: a file inside the session registry directory
-		content, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		content, err := os.ReadFile(filepath.Join(r.dir, entry.Name()))
 		if err != nil {
 			continue
 		}
@@ -333,15 +366,16 @@ func (b *localBackend) awaitRegisteredSession(
 	if interval > timeout {
 		interval = timeout
 	}
-	dir := b.sessionRegistryDir()
-	deadline := time.Now().Add(timeout)
+	registry := b.sessionRegistry()
+	clock := b.clock()
+	deadline := clock.Now().Add(libtime.Duration(timeout))
 	for {
-		for id := range sessionIDsNamed(dir, name) {
+		for id := range registry.SessionIDsNamed(name) {
 			if !preexisting[id] {
 				return id
 			}
 		}
-		if !time.Now().Before(deadline) {
+		if !clock.Now().Before(deadline) {
 			return ""
 		}
 		select {
@@ -388,7 +422,7 @@ func (b *localBackend) bindSession(
 		args = append(args, "task", "append-metrics-session", string(task), sessionID)
 	}
 	args = append(args, "--vault", vault.Name)
-	if err := b.vaultCLI().Run(ctx, args...); err != nil {
+	if err := b.vaultCLIRunner().Run(ctx, args...); err != nil {
 		return &Bind{Error: err.Error()}
 	}
 	return &Bind{Action: action}

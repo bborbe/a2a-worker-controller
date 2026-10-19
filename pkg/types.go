@@ -144,7 +144,7 @@ type CreateRequest struct {
 	// Only the TeamVault KEY travels here; the value is resolved controller-side.
 	Secrets []Secret `json:"secrets,omitempty"`
 	// Vault names the vault-cli vault the task lives in. Empty means the backend's own
-	// configured vault, which is what every create meant before the field existed. Only the
+	// configured vault. Only the
 	// local backend reads it: a named vault decides which task file the launcher and role are
 	// read from, the directory the tab starts in, and the vault the session binding is written
 	// to. An unknown name is refused before any worker is started.

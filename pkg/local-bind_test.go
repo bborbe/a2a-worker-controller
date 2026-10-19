@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	libtime "github.com/bborbe/time"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -21,9 +22,10 @@ import (
 
 const (
 	// testBindTimeout is the session-registry poll window the specs drive the backend with, far
-	// below the shipped DefaultLocalBindTimeout: every create that registers no session pays the
-	// window in full.
-	testBindTimeout = 30 * time.Millisecond
+	// below the shipped DefaultLocalBindTimeout. It is measured on a fake clock that advances
+	// testBindClockStep per reading, so the deadline is a count of polls rather than wall time.
+	testBindTimeout   = 3 * time.Millisecond
+	testBindClockStep = time.Millisecond
 	// testDefaultVaultName is the vault-cli name the fake resolver gives the configured vault.
 	testDefaultVaultName = "default-vault"
 )
@@ -51,12 +53,23 @@ func resetBindSeams() {
 	testVaultCLI = &mocks.PkgVaultCLI{}
 }
 
+// fakeBindClock is a clock that advances a fixed step on every reading.
+type fakeBindClock struct {
+	now libtime.DateTime
+}
+
+func (c *fakeBindClock) Now() libtime.DateTime {
+	c.now = c.now.Add(libtime.Duration(testBindClockStep))
+	return c.now
+}
+
 // bindSeams wires the current bind seams, and the short bind window, into a backend config.
 func bindSeams(config pkg.LocalConfig) pkg.LocalConfig {
 	config.SessionRegistryDir = testRegistryDir
 	config.BindTimeout = testBindTimeout
 	config.VaultResolver = testResolver
 	config.VaultCLI = testVaultCLI
+	config.CurrentDateTimeGetter = &fakeBindClock{now: libtime.DateTime(time.Unix(0, 0).UTC())}
 	return config
 }
 
@@ -110,9 +123,9 @@ var _ = Describe("LocalBackend session binding", func() {
 	}
 
 	// The session binding: the join from a tab to the session it started, through the session
-	// registry by tab name, and the fleet's ownership rule applied through vault-cli. Each of these
-	// is behaviour v0.14.1 did not have — it left a tab worker's session id to the worker's own
-	// session, read only from the configured vault.
+	// registry by tab name, and the fleet's ownership rule applied through vault-cli. The session
+	// id is resolved by the backend itself rather than left to the worker's own session, and the
+	// task is read from the vault the create names.
 	Describe("Session binding", func() {
 		const (
 			otherVaultName = "other-vault"
