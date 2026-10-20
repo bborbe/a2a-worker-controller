@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.16.1
 
 - fix: **the k8s backend answers a repeated `create` with the live worker and its token (`reused: true`) instead of refusing, so a retried spawn stops minting a second worker.** Only the docker backend carried that contract; on k8s a repeat `create` returned "task … already has worker …, whose token this controller did not keep", and a caller following that advice reaped the worker and created another — measured 2026-10-20, a second worker id appeared for one task. ⚠️ **No token store is added: the token is already in the cluster.** `createChildren` writes it into the worker's own Secret under `INTERACTIVE_AUTH_TOKEN` and `childMeta` names that Secret exactly as its owning Config, so the repeat create reads it back through the existing `GetSecret` — which also means the credential survives a controller restart for free, where the docker backend needs a file store only because a container has nowhere else to keep one. A worker whose Secret is gone or carries no token still refuses by id, keeping stop-then-create reachable. Change set: `pkg/kubernetes.go`, `pkg/kubernetes_test.go`, `CHANGELOG.md`.
 
