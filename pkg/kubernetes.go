@@ -12,6 +12,7 @@ import (
 	"github.com/bborbe/errors"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 // The defaults for the k8s backend's settings.
@@ -142,11 +143,11 @@ func NewKubernetesBackend(
 // Create starts one worker pod for the requested task and returns it with its own freshly
 // minted bearer token.
 //
-// ⚠️ A TASK THAT ALREADY HAS A WORKER IS REFUSED, NOT ANSWERED — the same contract the docker
-// backend keeps. Only one worker is ever started per task, but its token cannot be returned —
-// the controller kept no copy of it — so a success reply would name a worker no caller could
-// authenticate to. The refusal carries the existing worker's id, which is what lets the caller
-// stop that worker and create another.
+// ⚠️ A TASK THAT ALREADY HAS A WORKER IS ANSWERED WITH IT, NOT STARTED TWICE. Only one worker is
+// ever started per task, so a second create finds the existing Config and returns that worker with
+// Reused set — the same contract the docker backend keeps. That is what makes a retried spawn
+// recover the live worker instead of reaping and recreating it, the path that minted a second
+// worker id on 2026-10-20.
 func (b *kubernetesBackend) Create(
 	ctx context.Context,
 	req CreateRequest,
@@ -159,15 +160,7 @@ func (b *kubernetesBackend) Create(
 		return nil, err
 	}
 	if existing := configs.byTask(req.Task); existing != nil {
-		// The id is the whole value of this refusal: `stop` resolves ownership from it alone,
-		// so naming it is what turns an unreachable worker into a reaped one.
-		return nil, errors.Errorf(
-			ctx,
-			"task %q already has worker %q, whose token this controller did not keep; "+
-				"stop that worker and create another",
-			req.Task,
-			b.workerFor(*existing).WorkerID,
-		)
+		return b.reuseExistingWorker(ctx, *existing)
 	}
 
 	resolved, err := b.resolveDeclaredSecrets(ctx, req)
@@ -232,6 +225,64 @@ func (b *kubernetesBackend) Create(
 	}
 
 	return &CreateResponse{Worker: b.workerFor(*created), Token: token}, nil
+}
+
+// reuseExistingWorker answers a create whose task already has a worker: the existing worker and the
+// token from its own Secret, or the refusal naming that worker when no token can be read.
+//
+// ⚠️ THE TOKEN COMES FROM THE WORKER'S OWN SECRET, WHICH IS WHY NO STORE IS NEEDED. `createChildren`
+// writes it under `INTERACTIVE_AUTH_TOKEN` and `childMeta` names that Secret exactly as its owning
+// Config, so the credential a repeated create needs is already in the cluster and survives a
+// controller restart for free. The docker backend keeps a file store only because a container has
+// nowhere else to keep one.
+func (b *kubernetesBackend) reuseExistingWorker(
+	ctx context.Context,
+	existing agentv1.Config,
+) (*CreateResponse, error) {
+	token, err := b.storedToken(ctx, existing)
+	if err != nil {
+		return nil, err
+	}
+	if token == "" {
+		// ⚠️ THE WORKER ID IS THE POINT OF THIS REFUSAL, NOT DECORATION. It is the only handle a
+		// caller gets on a worker it cannot authenticate to, and `stop` resolves ownership from
+		// that id alone — so naming it is what turns an unreachable worker into a reaped one.
+		// This branch covers a worker whose Secret is gone or carries no token, not the ordinary
+		// retry, which is answered above.
+		return nil, errors.Errorf(
+			ctx,
+			"task %q already has worker %q, whose token this controller could not read; "+
+				"stop that worker and create another",
+			existing.Annotations[taskAnnotation],
+			b.workerFor(existing).WorkerID,
+		)
+	}
+	return &CreateResponse{
+		Worker: b.workerFor(existing),
+		Token:  token,
+		Reused: true,
+	}, nil
+}
+
+// storedToken returns the token the worker's own Secret carries, or the empty string when the
+// Secret is absent or holds no token. An absent entry is not an error: it means this worker cannot
+// be handed back, which the caller turns into the refusal naming its id.
+func (b *kubernetesBackend) storedToken(
+	ctx context.Context,
+	owner agentv1.Config,
+) (string, error) {
+	secretName := owner.Spec.SecretName
+	if secretName == "" {
+		secretName = owner.Name
+	}
+	secret, err := b.client.GetSecret(ctx, secretName)
+	if err != nil {
+		if apierrors.IsNotFound(errors.Cause(err)) {
+			return "", nil
+		}
+		return "", errors.Wrapf(ctx, err, "get worker secret %s failed", secretName)
+	}
+	return string(secret.Data[tokenEnvName]), nil
 }
 
 // resolveDeclaredSecrets settles everything a create can be refused for before any cluster
