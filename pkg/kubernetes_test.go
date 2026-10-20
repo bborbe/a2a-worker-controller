@@ -11,6 +11,8 @@ import (
 	agentv1 "github.com/bborbe/agent-task-executor/k8s/apis/agent.benjamin-borbe.de/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/bborbe/a2a-worker-controller/mocks"
@@ -140,16 +142,74 @@ var _ = Describe("KubernetesBackend", func() {
 				client.ListConfigsReturns([]agentv1.Config{
 					ownedWorkerConfig("existing", "Build the k3s Backend"),
 				}, nil)
+				// The worker's OWN Secret, deliberately distinct from the template's: a stub that
+				// answered both names with the template Secret would pass while the reuse handed
+				// back a credential nothing authenticates.
+				client.GetSecretStub = func(_ context.Context, name string) (*corev1.Secret, error) {
+					if name == "a2a-worker-existing" {
+						return &corev1.Secret{
+							ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+							Data:       map[string][]byte{testTokenEnvName: []byte(testWorkerToken)},
+						}, nil
+					}
+					secret := templateSecret()
+					return &secret, nil
+				}
 			})
 
-			It("refuses, naming the existing worker's id, and creates nothing", func() {
-				// ⚠️ The id is what makes the refusal actionable: `stop` resolves ownership from
-				// it alone, so a caller that does not receive it cannot reap the worker it is
-				// being told about.
-				Expect(err).To(MatchError(ContainSubstring("existing")))
-				Expect(response).To(BeNil())
+			It("returns the existing worker with its own token and Reused set", func() {
+				Expect(err).To(BeNil())
+				Expect(response.Reused).To(BeTrue())
+				Expect(response.Worker.WorkerID).To(Equal(pkg.WorkerID("existing")))
+				Expect(response.Token).To(Equal(testWorkerToken))
+			})
+
+			It("reads the worker's own Secret and creates nothing", func() {
+				Expect(err).To(BeNil())
+				Expect(client.GetSecretCallCount()).To(Equal(1))
+				_, name := client.GetSecretArgsForCall(0)
+				Expect(name).To(Equal("a2a-worker-existing"))
 				Expect(client.CreateConfigCallCount()).To(Equal(0))
 				Expect(client.CreateSecretCallCount()).To(Equal(0))
+			})
+
+			Context("when the worker's Secret carries no token", func() {
+				BeforeEach(func() {
+					client.GetSecretStub = func(_ context.Context, name string) (*corev1.Secret, error) {
+						if name == "a2a-worker-existing" {
+							return &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: name}}, nil
+						}
+						secret := templateSecret()
+						return &secret, nil
+					}
+				})
+
+				It("refuses, naming the existing worker's id, and creates nothing", func() {
+					// ⚠️ The id is what makes the refusal actionable: `stop` resolves ownership from
+					// it alone, so a caller that does not receive it cannot reap the worker it is
+					// being told about.
+					Expect(err).To(MatchError(ContainSubstring("existing")))
+					Expect(response).To(BeNil())
+					Expect(client.CreateConfigCallCount()).To(Equal(0))
+					Expect(client.CreateSecretCallCount()).To(Equal(0))
+				})
+			})
+
+			Context("when the worker's Secret is gone", func() {
+				BeforeEach(func() {
+					client.GetSecretStub = func(_ context.Context, name string) (*corev1.Secret, error) {
+						if name == "a2a-worker-existing" {
+							return nil, apierrors.NewNotFound(corev1.Resource("secrets"), name)
+						}
+						secret := templateSecret()
+						return &secret, nil
+					}
+				})
+
+				It("refuses rather than failing on the missing Secret", func() {
+					Expect(err).To(MatchError(ContainSubstring("existing")))
+					Expect(response).To(BeNil())
+				})
 			})
 		})
 
