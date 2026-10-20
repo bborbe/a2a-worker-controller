@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- chore: update github.com/bborbe/agent-task-executor to v0.18.13, github.com/bborbe/errors to v1.6.3, github.com/bborbe/http to v1.26.30, github.com/bborbe/log to v1.7.4, github.com/bborbe/metrics to v0.6.7, github.com/bborbe/run to v1.11.2, github.com/bborbe/sentry to v1.10.4, github.com/bborbe/service to v1.11.0, github.com/bborbe/time to v1.27.17, github.com/bborbe/vault-cli to v0.174.0, github.com/onsi/ginkgo/v2 to v2.33.1, github.com/onsi/gomega to v1.44.0, github.com/prometheus/client_golang to v1.25.0, k8s.io/api to v0.38.0-alpha.2, k8s.io/apimachinery to v0.38.0-alpha.2, k8s.io/client-go to v0.38.0-alpha.2
+
 ## v0.16.0
 
 - feat: a repeated `create` for a task that already has a worker returns that worker and its token with `reused: true` instead of refusing. The controller now keeps each worker's bearer token in a `0600` JSON store (`~/.local/state/a2a-worker-controller/docker-workers.json`, written into a `0750` directory and removed when the worker is stopped), which is what makes the retry answerable: before, the token existed only in the create reply, so a spawn that timed out after the container started left a worker whose token the caller never received, and a blind retry hit a refusal that forced stop-then-recreate — the orphan path. ⚠️ **This is a deliberate security trade: the token moves from memory-only to at rest.** The token still never reaches a `list` response, a log line or a supervisor record. A worker whose token cannot be persisted is removed rather than left running, so a failed store write cannot strand a worker nobody can authenticate to; a worker created before the store existed still refuses by id, keeping the stop-then-create recovery reachable.
