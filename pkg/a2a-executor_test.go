@@ -271,6 +271,7 @@ var _ = Describe("A2A surface", func() {
 		body := `{"jsonrpc":"2.0","id":"1","method":"SendMessage","params":{"message":` +
 			`{"messageId":"m1","role":"ROLE_USER","parts":[{"data":{"operation":"list"}}]}}}`
 		req := httptest.NewRequest("POST", pkg.A2APath, strings.NewReader(body))
+		req.Header.Set("A2A-Version", string(a2a.Version))
 		resp := httptest.NewRecorder()
 
 		handler.ServeHTTP(resp, req)

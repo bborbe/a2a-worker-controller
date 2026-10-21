@@ -149,7 +149,9 @@ var _ = Describe("KubernetesBackend", func() {
 					if name == "a2a-worker-existing" {
 						return &corev1.Secret{
 							ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
-							Data:       map[string][]byte{testTokenEnvName: []byte(testWorkerToken)},
+							Data: map[string][]byte{
+								testTokenEnvName: []byte(testWorkerToken),
+							},
 						}, nil
 					}
 					secret := templateSecret()

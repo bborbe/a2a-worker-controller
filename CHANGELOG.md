@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- chore: update Go to 1.27.3 and github.com/a2aproject/a2a-go/v2 to v2.7.0, github.com/bborbe/agent-task-executor to v0.23.4, github.com/bborbe/errors to v1.6.3, github.com/bborbe/http to v1.26.30, github.com/bborbe/log to v1.7.5, github.com/bborbe/metrics to v0.6.8, github.com/bborbe/run to v1.11.2, github.com/bborbe/sentry to v1.10.5, github.com/bborbe/service to v1.11.1, github.com/bborbe/time to v1.27.18, github.com/bborbe/vault-cli to v0.177.0, github.com/onsi/ginkgo/v2 to v2.33.1, github.com/onsi/gomega to v1.44.0, github.com/prometheus/client_golang to v1.25.0, k8s.io/api to v0.37.1, k8s.io/apimachinery to v0.37.1, k8s.io/client-go to v0.37.1
+
 ## v0.16.1
 
 - fix: **the k8s backend answers a repeated `create` with the live worker and its token (`reused: true`) instead of refusing, so a retried spawn stops minting a second worker.** Only the docker backend carried that contract; on k8s a repeat `create` returned "task … already has worker …, whose token this controller did not keep", and a caller following that advice reaped the worker and created another — measured 2026-10-20, a second worker id appeared for one task. ⚠️ **No token store is added: the token is already in the cluster.** `createChildren` writes it into the worker's own Secret under `INTERACTIVE_AUTH_TOKEN` and `childMeta` names that Secret exactly as its owning Config, so the repeat create reads it back through the existing `GetSecret` — which also means the credential survives a controller restart for free, where the docker backend needs a file store only because a container has nowhere else to keep one. A worker whose Secret is gone or carries no token still refuses by id, keeping stop-then-create reachable. Change set: `pkg/kubernetes.go`, `pkg/kubernetes_test.go`, `CHANGELOG.md`.
