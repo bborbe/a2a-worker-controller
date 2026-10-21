@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.16.2
 
 - chore: update Go to 1.27.3 and github.com/a2aproject/a2a-go/v2 to v2.7.0, github.com/bborbe/agent-task-executor to v0.23.4, github.com/bborbe/errors to v1.6.3, github.com/bborbe/http to v1.26.30, github.com/bborbe/log to v1.7.5, github.com/bborbe/metrics to v0.6.8, github.com/bborbe/run to v1.11.2, github.com/bborbe/sentry to v1.10.5, github.com/bborbe/service to v1.11.1, github.com/bborbe/time to v1.27.18, github.com/bborbe/vault-cli to v0.177.0, github.com/onsi/ginkgo/v2 to v2.33.1, github.com/onsi/gomega to v1.44.0, github.com/prometheus/client_golang to v1.25.0, k8s.io/api to v0.37.1, k8s.io/apimachinery to v0.37.1, k8s.io/client-go to v0.37.1
 
