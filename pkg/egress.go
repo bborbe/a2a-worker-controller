@@ -30,12 +30,19 @@ const cidrPrefix = "cidr="
 // `dev`, port 9090 is served by the vault writers and by the trading gateways alike, so
 // `dev:9090` would open both. `dev/app=vault-obsidian-personal:9090` opens the vault alone.
 //
-// IPBlock names an EXTERNAL destination by CIDR, and exists because a worker's task may need
-// the public internet: `make check` clones from github.com, fetches modules from
+// IPBlock names an EXTERNAL destination by CIDR, IPv4 or IPv6, and exists because a worker's
+// task may need the public internet: `make check` clones from github.com, fetches modules from
 // proxy.golang.org and pulls trivy's database from ghcr.io, and a namespace peer cannot express
 // any of them. ⚠️ A NetworkPolicy matches addresses and never names, so a provider's published
 // ranges must be listed rather than its hostname — and a provider that moves its addresses
 // needs this list updated, which no DNS lookup can do for it.
+//
+// ⚠️ A CIDR that OVERLAPS the cluster's own pod network defeats the scoping the two fields
+// above exist for: `cidr=10.0.0.0/8:9090` allows every pod on that port, whatever its
+// namespace or labels, and `cidr=0.0.0.0/0:443` allows the whole internet. Neither is refused,
+// because EGRESS_ALLOW is operator-controlled configuration and an operator may have a reason;
+// the blast radius is the operator's to judge, and it is not the narrow one the namespace form
+// gives.
 type EgressDestination struct {
 	Namespace string
 	PodLabels map[string]string
@@ -100,20 +107,27 @@ func ParseEgressDestinations(ctx context.Context, value string) ([]EgressDestina
 
 // parseCIDRDestination parses the part of an external entry after its `cidr=` prefix. The CIDR
 // is normalised to its network address, so `140.82.112.5/20` and `140.82.112.0/20` produce the
-// same policy rule rather than two spellings of one destination.
+// same rule rather than two spellings of one destination.
+//
+// ⚠️ The port is split at the LAST colon, not the first: an IPv6 CIDR contains colons, so
+// `cidr=2001:db8::/32:443` cut at the first one yields `2001` and a CIDR that net.ParseCIDR
+// refuses — reporting "no valid CIDR" for a CIDR that is valid. Both forms the cluster accepts
+// are therefore reachable, since net.ParseCIDR and a NetworkPolicy ipBlock take IPv4 and IPv6
+// alike.
 func parseCIDRDestination(
 	ctx context.Context,
 	entry string,
 	rest string,
 ) (EgressDestination, error) {
-	cidrValue, portValue, found := strings.Cut(rest, ":")
-	if !found || cidrValue == "" {
+	cut := strings.LastIndex(rest, ":")
+	if cut <= 0 {
 		return EgressDestination{}, errors.Errorf(
 			ctx,
 			"egress entry %q is not cidr=<CIDR>:port",
 			entry,
 		)
 	}
+	cidrValue, portValue := rest[:cut], rest[cut+1:]
 	_, network, err := net.ParseCIDR(cidrValue)
 	if err != nil {
 		return EgressDestination{}, errors.Errorf(ctx, "egress entry %q has no valid CIDR", entry)
