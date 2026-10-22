@@ -51,6 +51,31 @@ var _ = Describe("ParseEgressDestinations", func() {
 		Expect(destinations).To(BeEmpty())
 	})
 
+	It("parses an external destination as a CIDR alongside an in-cluster one", func() {
+		destinations, err := pkg.ParseEgressDestinations(ctx, "dev:8788,cidr=140.82.112.0/20:443")
+		Expect(err).To(BeNil())
+		Expect(destinations).To(Equal([]pkg.EgressDestination{
+			{Namespace: "dev", Port: 8788},
+			{IPBlock: "140.82.112.0/20", Port: 443},
+		}))
+	})
+
+	It("normalises a CIDR to its network address, so two spellings are one rule", func() {
+		destinations, err := pkg.ParseEgressDestinations(ctx, "cidr=140.82.112.5/20:443")
+		Expect(err).To(BeNil())
+		Expect(destinations).To(Equal([]pkg.EgressDestination{
+			{IPBlock: "140.82.112.0/20", Port: 443},
+		}))
+	})
+
+	It("keeps a /32 CIDR as the single address it names", func() {
+		destinations, err := pkg.ParseEgressDestinations(ctx, "cidr=10.43.0.1/32:443")
+		Expect(err).To(BeNil())
+		Expect(destinations).To(Equal([]pkg.EgressDestination{
+			{IPBlock: "10.43.0.1/32", Port: 443},
+		}))
+	})
+
 	DescribeTable("refuses a malformed entry rather than dropping it",
 		func(value string) {
 			_, err := pkg.ParseEgressDestinations(ctx, value)
@@ -64,5 +89,10 @@ var _ = Describe("ParseEgressDestinations", func() {
 		Entry("label without value", "dev/app=:9090"),
 		Entry("label without key", "dev/=vault:9090"),
 		Entry("label without equals", "dev/app:9090"),
+		Entry("cidr without port", "cidr=140.82.112.0/20"),
+		Entry("cidr empty", "cidr=:443"),
+		Entry("cidr not a cidr", "cidr=github.com:443"),
+		Entry("cidr with no mask", "cidr=140.82.112.0:443"),
+		Entry("cidr with port zero", "cidr=140.82.112.0/20:0"),
 	)
 })

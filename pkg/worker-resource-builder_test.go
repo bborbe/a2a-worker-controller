@@ -347,6 +347,31 @@ var _ = Describe("WorkerResourceBuilder", func() {
 				Expect(rule.Ports[0].Port.IntVal).To(Equal(want.port))
 			}
 		})
+
+		It(
+			"allows an external destination as an IPBlock peer, with no namespace or pod selector",
+			func() {
+				config := testKubernetesConfig()
+				config.EgressAllow = append(config.EgressAllow, pkg.EgressDestination{
+					IPBlock: "140.82.112.0/20",
+					Port:    443,
+				})
+
+				policy := pkg.NewWorkerResourceBuilder(config).
+					BuildNetworkPolicy(storedWorkerConfig(builder))
+
+				rule := policy.Spec.Egress[len(policy.Spec.Egress)-1]
+				Expect(rule.To).To(HaveLen(1))
+				Expect(rule.To[0].IPBlock).NotTo(BeNil())
+				Expect(rule.To[0].IPBlock.CIDR).To(Equal("140.82.112.0/20"))
+				Expect(rule.To[0].IPBlock.Except).To(BeEmpty())
+				Expect(rule.To[0].NamespaceSelector).To(BeNil())
+				Expect(rule.To[0].PodSelector).To(BeNil())
+				Expect(rule.Ports).To(HaveLen(1))
+				Expect(*rule.Ports[0].Protocol).To(Equal(corev1.ProtocolTCP))
+				Expect(rule.Ports[0].Port.IntVal).To(BeEquivalentTo(443))
+			},
+		)
 	})
 
 	Describe("A2AURL", func() {

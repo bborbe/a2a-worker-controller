@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: `EGRESS_ALLOW` can name an external destination, so a worker whose task needs the public internet has a way to be given it. An entry of the form `cidr=<CIDR>:port` becomes an `ipBlock` peer in the worker's NetworkPolicy (`cidr=140.82.112.0/20:443`), and the CIDR is normalised to its network address so `140.82.112.5/20` and `140.82.112.0/20` produce one rule rather than two. Before this, `ParseEgressDestinations` accepted only `namespace[/key=value]:port`, so every destination had to be a namespace inside the cluster — which made a `make check` impossible on a worker, since it clones from github.com, fetches modules from proxy.golang.org and pulls trivy's database from ghcr.io. ⚠️ A NetworkPolicy matches addresses and never names, so the operator lists a provider's published ranges; a provider that moves its addresses needs that list updated. The default stays an empty allow list, so no existing worker gains reach it did not already have.
+
 ## v0.16.2
 
 - chore: update Go to 1.27.3 and github.com/a2aproject/a2a-go/v2 to v2.7.0, github.com/bborbe/agent-task-executor to v0.23.4, github.com/bborbe/errors to v1.6.3, github.com/bborbe/http to v1.26.30, github.com/bborbe/log to v1.7.5, github.com/bborbe/metrics to v0.6.8, github.com/bborbe/run to v1.11.2, github.com/bborbe/sentry to v1.10.5, github.com/bborbe/service to v1.11.1, github.com/bborbe/time to v1.27.18, github.com/bborbe/vault-cli to v0.177.0, github.com/onsi/ginkgo/v2 to v2.33.1, github.com/onsi/gomega to v1.44.0, github.com/prometheus/client_golang to v1.25.0, k8s.io/api to v0.37.1, k8s.io/apimachinery to v0.37.1, k8s.io/client-go to v0.37.1
