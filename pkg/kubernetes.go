@@ -47,8 +47,9 @@ type KubernetesConfig struct {
 	// workers that inherited the template's class would share the template's pod cap, which the
 	// template's own pod already fills.
 	WorkerPriorityClass string
-	// EgressAllow lists the in-cluster destinations each worker's NetworkPolicy allows, on top
-	// of DNS. Everything else — the public internet included — is denied.
+	// EgressAllow lists the destinations each worker's NetworkPolicy allows, on top of DNS: an
+	// in-cluster namespace (optionally narrowed to a pod label) or an external CIDR. Everything
+	// not named here — the rest of the public internet included — is denied.
 	EgressAllow []EgressDestination
 	// TeamVault resolves a declared secret's key to its value. A nil resolver refuses any
 	// create that declares a secret, rather than writing a Config whose pod would start

@@ -256,8 +256,14 @@ func (b *workerResourceBuilder) BuildNetworkPolicy(
 
 // destinationPeer selects destination's pods: every pod in its namespace, narrowed to those
 // carrying its PodLabels when it names any. Namespace and pod selector sit in one peer, so the
-// two are ANDed — a pod with the label in another namespace does not match.
+// two are ANDed — a pod with the label in another namespace does not match. An external
+// destination becomes an IPBlock peer instead: it has no namespace and no pod to select.
 func destinationPeer(destination EgressDestination) networkingv1.NetworkPolicyPeer {
+	if destination.IPBlock != "" {
+		return networkingv1.NetworkPolicyPeer{
+			IPBlock: &networkingv1.IPBlock{CIDR: destination.IPBlock},
+		}
+	}
 	peer := namespacePeer(destination.Namespace)
 	if len(destination.PodLabels) > 0 {
 		peer.PodSelector = &metav1.LabelSelector{MatchLabels: destination.PodLabels}

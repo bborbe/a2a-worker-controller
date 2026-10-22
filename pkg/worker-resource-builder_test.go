@@ -5,6 +5,8 @@
 package pkg_test
 
 import (
+	"context"
+
 	agentv1 "github.com/bborbe/agent-task-executor/k8s/apis/agent.benjamin-borbe.de/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -347,6 +349,60 @@ var _ = Describe("WorkerResourceBuilder", func() {
 				Expect(rule.Ports[0].Port.IntVal).To(Equal(want.port))
 			}
 		})
+
+		It(
+			"allows an external destination as an IPBlock peer, with no namespace or pod selector",
+			func() {
+				config := testKubernetesConfig()
+				config.EgressAllow = append(config.EgressAllow, pkg.EgressDestination{
+					IPBlock: "140.82.112.0/20",
+					Port:    443,
+				})
+
+				policy := pkg.NewWorkerResourceBuilder(config).
+					BuildNetworkPolicy(storedWorkerConfig(builder))
+
+				rule := policy.Spec.Egress[len(policy.Spec.Egress)-1]
+				Expect(rule.To).To(HaveLen(1))
+				Expect(rule.To[0].IPBlock).NotTo(BeNil())
+				Expect(rule.To[0].IPBlock.CIDR).To(Equal("140.82.112.0/20"))
+				Expect(rule.To[0].IPBlock.Except).To(BeEmpty())
+				Expect(rule.To[0].NamespaceSelector).To(BeNil())
+				Expect(rule.To[0].PodSelector).To(BeNil())
+				Expect(rule.Ports).To(HaveLen(1))
+				Expect(*rule.Ports[0].Protocol).To(Equal(corev1.ProtocolTCP))
+				Expect(rule.Ports[0].Port.IntVal).To(BeEquivalentTo(443))
+			},
+		)
+
+		It(
+			"carries a parsed EGRESS_ALLOW value through to the policy, in order",
+			func() {
+				// The tests above inject EgressDestination directly, so none of them exercises
+				// the path an operator actually takes: one EGRESS_ALLOW string, parsed, built.
+				parsed, err := pkg.ParseEgressDestinations(
+					context.Background(),
+					"dev:8788,cidr=140.82.112.0/20:443",
+				)
+				Expect(err).To(BeNil())
+
+				config := testKubernetesConfig()
+				config.EgressAllow = parsed
+
+				policy := pkg.NewWorkerResourceBuilder(config).
+					BuildNetworkPolicy(storedWorkerConfig(builder))
+
+				// DNS first, then one rule per entry, in the order the operator wrote them.
+				Expect(policy.Spec.Egress).To(HaveLen(3))
+				Expect(policy.Spec.Egress[0].To[0].NamespaceSelector.MatchLabels).
+					To(HaveKeyWithValue("kubernetes.io/metadata.name", "kube-system"))
+				Expect(policy.Spec.Egress[1].To[0].NamespaceSelector.MatchLabels).
+					To(HaveKeyWithValue("kubernetes.io/metadata.name", "dev"))
+				Expect(policy.Spec.Egress[1].Ports[0].Port.IntVal).To(BeEquivalentTo(8788))
+				Expect(policy.Spec.Egress[2].To[0].IPBlock.CIDR).To(Equal("140.82.112.0/20"))
+				Expect(policy.Spec.Egress[2].Ports[0].Port.IntVal).To(BeEquivalentTo(443))
+			},
+		)
 	})
 
 	Describe("A2AURL", func() {
