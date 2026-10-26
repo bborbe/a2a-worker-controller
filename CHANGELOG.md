@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.18.0
 
 - feat: `BUILD_TARGET` selects where `make build` runs — `local` (the default) keeps the Docker daemon, any other value builds in that cluster as a Job rendered from `hack/build-job.yaml`, so the release image no longer needs the Mac
 - fix: `hack/build-cluster-bootstrap.sh` passes the push credential to `jq` through the environment instead of argv, reads the registry auths key from the template instead of hardcoding docker.io's, checks for a missing kubeconfig the way the runner does, and resolves the CLI's config in the order teamvault-cli documents. The auths-key extraction no longer aborts the script silently when the template carries no `https://` key: a bare host is a valid dockerconfigjson key, and `grep` exiting 1 under `set -e` killed the script before its own guard could name the problem
