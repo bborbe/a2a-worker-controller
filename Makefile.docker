@@ -27,8 +27,15 @@ BUILD_REF ?= $(shell git symbolic-ref -q --short HEAD || git rev-parse HEAD)
 # have run. Any shell-active character in any of them refuses the whole invocation.
 BUILD_VALUES = $(BUILD_TARGET)$(BUILD_NAMESPACE)$(BUILD_REPO_URL)$(BUILD_REF)$(BRANCH)$(BUILD_DOCKERFILE)$(DOCKER_REGISTRY)$(SERVICE)$(BUILD_PUSH_SECRET)$(BUILD_TIMEOUT)
 SHELL_ACTIVE := ' " $$ ` \ ( ) ; & | < > ! *
+# Scoped to the goals that render these values. BUILD_REF and BRANCH default to the
+# current branch name, and an ordinary refname may legally contain '(' or '!', so an
+# unscoped check would abort `make test` on a branch called feat/a(b). Evaluating at
+# parse time still puts it ahead of every prerequisite, which a recipe-line guard does
+# not — upload and clean render the same values and would already have run.
+ifneq ($(filter build upload clean buca,$(MAKECMDGOALS)),)
 ifneq ($(strip $(foreach c,$(SHELL_ACTIVE),$(findstring $(c),$(BUILD_VALUES)))),)
 $(error a build value contains a shell metacharacter; refusing to build)
+endif
 endif
 
 .PHONY: build

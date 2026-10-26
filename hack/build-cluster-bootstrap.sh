@@ -5,7 +5,7 @@
 #
 # Called by hand before the first `make build BUILD_TARGET=<cluster>` against a
 # cluster. It deliberately creates no Job: jobs are per-build, rendered by
-# hack/build-cluster.sh, which refuses to run when one already exists.
+# hack/build-cluster.sh, which replaces a finished Job and refuses a running one.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,11 +112,16 @@ TV_USER="${TV_USER}" TV_PASS="${TV_PASS}" jq -n --arg key "${AUTHS_KEY}" \
 unset TV_USER TV_PASS
 [ -s "${RENDERED}" ] || die "failed to render ${TEMPLATE}"
 
+# --server-side: client-side apply records the whole applied manifest — including
+# .data.dockerconfigjson — in the kubectl.kubernetes.io/last-applied-configuration
+# annotation, where it outlives a rotation and is exported by tooling and backups that
+# redact .data but not annotations. Server-side apply tracks field ownership instead of
+# values, so the credential stays only in .data.
 kc create secret generic "${BUILD_PUSH_SECRET}" \
 	-n "${NAMESPACE}" \
 	--type=kubernetes.io/dockerconfigjson \
 	--from-file=.dockerconfigjson="${RENDERED}" \
-	--dry-run=client -o yaml | kc apply -f -
+	--dry-run=client -o yaml | kc apply --server-side -f -
 echo "build-cluster-bootstrap: secret ${NAMESPACE}/${BUILD_PUSH_SECRET} present"
 
 echo "build-cluster-bootstrap: ready — make build BUILD_TARGET=${BUILD_TARGET}"
