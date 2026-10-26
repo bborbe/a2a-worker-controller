@@ -14,7 +14,10 @@ BUILD_PUSH_SECRET ?= buildkit-push
 # use as an image tag (`feat/build-target` becomes `feat-build-target`), so a Job
 # told to clone $(BRANCH) would ask for a branch that does not exist. BUILD_REF
 # keeps the real ref and is independent of the tag the image is pushed under.
-BUILD_REF ?= $(shell git rev-parse --abbrev-ref HEAD)
+# `git rev-parse --abbrev-ref` prints the literal "HEAD" in a detached checkout —
+# the state after `git checkout <tag>`, which is the release flow this exists to
+# move onto a cluster — so fall back to the commit SHA, which the Job can fetch.
+BUILD_REF ?= $(shell git symbolic-ref -q --short HEAD || git rev-parse HEAD)
 
 .PHONY: build
 build:
