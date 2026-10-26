@@ -1,10 +1,12 @@
 # `git rev-parse --abbrev-ref` prints the literal "HEAD" in a detached checkout — the
 # state after `git checkout <tag>`, which is how a release is built — and this value is
 # the image tag, the build Job's name and the deploy manifest's BRANCH substitution, so
-# "HEAD" would name an image nothing can pull. Fall back to the tag (or the short SHA
-# when HEAD is untagged) so all three agree. On a branch this is byte-identical to the
-# old command: same ref, same '/' sanitisation.
-BRANCH ?= $(shell b=$$(git symbolic-ref -q --short HEAD); if [ -n "$$b" ]; then printf '%s' "$$b" | tr '/' '-'; else git describe --tags --always --dirty; fi)
+# "HEAD" would name an image nothing can pull. Detached, take the release tag pointing
+# at HEAD rather than `git describe --tags`, which picks an arbitrary tag when several
+# share a commit (measured: it returned `latest`). Untagged, fall back to the short SHA.
+# Both fallbacks are sanitised like the branch path, because a tag may contain '/'.
+# On a branch this is byte-identical to the old command: same ref, same sanitisation.
+BRANCH ?= $(shell b=$$(git symbolic-ref -q --short HEAD); if [ -n "$$b" ]; then printf '%s' "$$b" | tr '/' '-'; else t=$$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1); if [ -n "$$t" ]; then printf '%s' "$$t" | tr '/' '-'; else git describe --tags --always --dirty | tr '/' '-'; fi; fi)
 HOSTNAME ?= $(shell hostname -s)
 ROOTDIR ?= $(shell git rev-parse --show-toplevel)
 TEAMVAULT ?= ~/.teamvault.json

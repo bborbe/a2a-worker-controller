@@ -107,8 +107,13 @@ if [ -n "${SOURCE_DATE_EPOCH:-}" ] && [ -n "${commit_epoch}" ] && [ "${SOURCE_DA
 	die "SOURCE_DATE_EPOCH ${SOURCE_DATE_EPOCH} disagrees with ${REF}'s commit epoch ${commit_epoch}; unset it, or set it to that value"
 fi
 [ -n "${SOURCE_DATE_EPOCH:-}" ] || SOURCE_DATE_EPOCH="${commit_epoch}"
-printf '%s' "${SOURCE_DATE_EPOCH}" | grep -qE '^[0-9]+$' ||
+# An empty value means REF did not resolve locally; anything else must be a plain
+# number. Through check_value rather than printf|grep, which matches on the first
+# line and would let a multi-line exported value reach the manifest with an
+# embedded newline — the same hole closed for TIMEOUT.
+[ -n "${SOURCE_DATE_EPOCH}" ] ||
 	die "cannot resolve REF '${REF}' to a commit in the local repository; run git fetch and retry"
+check_value SOURCE_DATE_EPOCH "${SOURCE_DATE_EPOCH}" '^[0-9]+$'
 
 # BUILD_DATE is derived from the commit epoch rather than read from the clock, so
 # two builds of one commit stamp the same date. BSD and GNU date disagree on the
