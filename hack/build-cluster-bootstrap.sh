@@ -87,8 +87,9 @@ TEAMVAULT_KEY="$(sed -nE 's/.*"([A-Za-z0-9]{6,12})" \| teamvaultUser.*/\1/p' "${
 [ -n "${TEAMVAULT_KEY}" ] || die "no teamvaultUser lookup key found in ${TEMPLATE}"
 # `|| true` is load-bearing: grep exits 1 when nothing matches, pipefail propagates
 # that through `head`, and `set -e` would kill the script at this assignment — before
-# the guard below could name the problem. A bare-host auths key (registry.example.com
-# rather than an https:// URL) is valid dockerconfigjson, so the no-match path is real.
+# the guard below could name the problem. Only an `https://`-prefixed auths key is
+# supported: a bare-host key (registry.example.com) is valid dockerconfigjson but this
+# extraction cannot read it, so it fails here rather than pushing under the wrong key.
 AUTHS_KEY="$(grep -oE 'https?://[^"]+' "${TEMPLATE}" | head -1 || true)"
 [ -n "${AUTHS_KEY}" ] || die "no https://-prefixed auths key found in ${TEMPLATE} (a bare host is valid dockerconfigjson, but this extraction cannot read it)"
 

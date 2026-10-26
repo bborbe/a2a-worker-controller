@@ -19,18 +19,20 @@ BUILD_PUSH_SECRET ?= buildkit-push
 # move onto a cluster — so fall back to the commit SHA, which the Job can fetch.
 BUILD_REF ?= $(shell git symbolic-ref -q --short HEAD || git rev-parse HEAD)
 
-# A make value reaches the shell by textual substitution, so one carrying a quote would
-# close its assignment and the remainder would run as shell — a branch named
-# `feat/x'; cmd; '` would execute cmd on the operator's host, and both quotes and
-# semicolons are legal in a git refname. hack/build-cluster.sh whitelists every value it
-# renders, but that check runs after the shell has already parsed this line. The guard
-# therefore sits ABOVE the arm split, so it covers the local arm too: that arm pastes
-# BRANCH into `docker build` unquoted, where a `;` alone is enough.
+# A make value reaches the shell by textual substitution, and the shell re-expands $(…)
+# and backticks even inside double quotes — so refusing only the quote characters is not
+# enough: '$', '(', ')' and '`' are all legal in a git refname and all re-expand. This
+# is evaluated at PARSE time, before any target, because a recipe-line guard runs too
+# late: check-version-tag, upload and clean render the same values and would already
+# have run. Any shell-active character in any of them refuses the whole invocation.
 BUILD_VALUES = $(BUILD_TARGET)$(BUILD_NAMESPACE)$(BUILD_REPO_URL)$(BUILD_REF)$(BRANCH)$(BUILD_DOCKERFILE)$(DOCKER_REGISTRY)$(SERVICE)$(BUILD_PUSH_SECRET)$(BUILD_TIMEOUT)
+SHELL_ACTIVE := ' " $$ ` \ ( ) ; & | < > ! *
+ifneq ($(strip $(foreach c,$(SHELL_ACTIVE),$(findstring $(c),$(BUILD_VALUES)))),)
+$(error a build value contains a shell metacharacter; refusing to build)
+endif
 
 .PHONY: build
 build:
-	@$(if $(findstring ',$(BUILD_VALUES))$(findstring ",$(BUILD_VALUES)),$(error a build value contains a quote character; refusing to interpolate it into a shell command),)
 ifeq ($(BUILD_TARGET),local)
 	DOCKER_BUILDKIT=1 \
 	docker build \
