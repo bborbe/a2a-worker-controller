@@ -2,9 +2,9 @@
 # Renders hack/build-job.yaml and runs it in the target cluster.
 #
 # Called from `make build BUILD_TARGET=<sun|nukedev|nukeprod|kubectl-context>`
-# (Makefile.docker) with
-# BUILD_TARGET, NAMESPACE, REPO_URL, REF, TAG, DOCKERFILE, IMAGE, PUSH,
-# PUSH_SECRET and TIMEOUT in the environment. Not intended to be run by hand.
+# (Makefile.docker) with BUILD_TARGET, NAMESPACE, REPO_URL, REF, TAG,
+# DOCKERFILE, IMAGE, DOCKER_REGISTRY, PUSH, PUSH_SECRET and TIMEOUT in the
+# environment. Not intended to be run by hand.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,25 +40,36 @@ require REPO_URL
 require REF
 require TAG
 require IMAGE
+require DOCKER_REGISTRY
 require PUSH_SECRET
 
 # Values are substituted into the manifest with sed and land in shell scripts
 # inside it, so each one is restricted to a whitelist before rendering. A value
 # outside the whitelist is rejected, never escaped.
-printf '%s' "${REF}" | grep -qE '^[A-Za-z0-9._/-]+$' ||
-	die "REF '${REF}' contains characters outside [A-Za-z0-9._/-]"
-printf '%s' "${TAG}" | grep -qE '^[A-Za-z0-9._-]+$' ||
-	die "TAG '${TAG}' contains characters outside [A-Za-z0-9._-]"
-printf '%s' "${IMAGE}" | grep -qE '^[A-Za-z0-9._/:-]+$' ||
-	die "IMAGE '${IMAGE}' contains characters outside [A-Za-z0-9._/:-]"
-printf '%s' "${REPO_URL}" | grep -qE '^[A-Za-z0-9._/:@-]+$' ||
-	die "REPO_URL '${REPO_URL}' contains characters outside [A-Za-z0-9._/:@-]"
-printf '%s' "${DOCKERFILE}" | grep -qE '^[A-Za-z0-9._/-]+$' ||
-	die "DOCKERFILE '${DOCKERFILE}' contains characters outside [A-Za-z0-9._/-]"
-printf '%s' "${PUSH_SECRET}" | grep -qE '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$' ||
-	die "PUSH_SECRET '${PUSH_SECRET}' is not a valid Kubernetes secret name"
-printf '%s' "${NAMESPACE}" | grep -qE '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$' ||
-	die "NAMESPACE '${NAMESPACE}' is not a valid Kubernetes namespace name"
+#
+# `case` decides the two shapes a grep cannot see. grep reads line by line, so a
+# value carrying a newline passed as soon as one of its lines matched; and a
+# leading `-` or `..` sits inside every whitelist below even though REF reaches
+# `git fetch`, which would read `--upload-pack=…` as an option.
+check_value() {
+	local name="$1" value="$2" pattern="$3"
+	case "${value}" in
+	"") die "${name} is empty" ;;
+	-* | ..*) die "${name} '${value}' starts with '-' or '..'" ;;
+	*$'\n'*) die "${name} contains a newline" ;;
+	esac
+	printf '%s' "${value}" | grep -qE "${pattern}" ||
+		die "${name} '${value}' is outside ${pattern}"
+}
+
+check_value REF "${REF}" '^[A-Za-z0-9._/-]+$'
+check_value TAG "${TAG}" '^[A-Za-z0-9._-]+$'
+check_value IMAGE "${IMAGE}" '^[A-Za-z0-9._/:-]+$'
+check_value DOCKER_REGISTRY "${DOCKER_REGISTRY}" '^[A-Za-z0-9._:/-]+$'
+check_value REPO_URL "${REPO_URL}" '^[A-Za-z0-9._/:@-]+$'
+check_value DOCKERFILE "${DOCKERFILE}" '^[A-Za-z0-9._/-]+$'
+check_value PUSH_SECRET "${PUSH_SECRET}" '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
+check_value NAMESPACE "${NAMESPACE}" '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
 printf '%s' "${TIMEOUT}" | grep -qE '^[0-9]+$' ||
 	die "TIMEOUT '${TIMEOUT}' is not a number of seconds"
 case "${PUSH}" in
@@ -86,8 +97,18 @@ fi
 printf '%s' "${SOURCE_DATE_EPOCH}" | grep -qE '^[0-9]+$' ||
 	die "cannot resolve REF '${REF}' to a commit in the local repository; run git fetch and retry"
 
+# BUILD_DATE is derived from the commit epoch rather than read from the clock, so
+# two builds of one commit stamp the same date. BSD and GNU date disagree on the
+# flag that reads an epoch, and this runs on the operator's Mac.
+if ! BUILD_DATE="$(date -u -r "${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; then
+	BUILD_DATE="$(date -u -d "@${SOURCE_DATE_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)"
+fi
+
 JOB_NAME="build-$(printf '%s' "${TAG}" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9.-]/-/g')"
-JOB_NAME="${JOB_NAME:0:63}"
+# A Job name is a DNS label: truncation can leave a trailing '-' or '.', which
+# the API server rejects as an invalid name.
+JOB_NAME="$(printf '%s' "${JOB_NAME:0:63}" | sed -e 's/[.-]*$//')"
+[ -n "${JOB_NAME}" ] || die "cannot derive a Job name from TAG '${TAG}'"
 
 rendered="$(mktemp)"
 trap 'rm -f "${rendered}"' EXIT
@@ -104,6 +125,8 @@ sed \
 	-e "s|__PUSH_SECRET__|${PUSH_SECRET}|g" \
 	-e "s|__DEADLINE_SECONDS__|${TIMEOUT}|g" \
 	-e "s|__SOURCE_DATE_EPOCH__|${SOURCE_DATE_EPOCH}|g" \
+	-e "s|__BUILD_DATE__|${BUILD_DATE}|g" \
+	-e "s|__DOCKER_REGISTRY__|${DOCKER_REGISTRY}|g" \
 	"${TEMPLATE}" >"${rendered}"
 
 if kc -n "${NAMESPACE}" get job "${JOB_NAME}" --ignore-not-found -o name | grep -q .; then
@@ -121,8 +144,20 @@ fi
 deadline=$(( $(date +%s) + TIMEOUT + 120 ))
 outcome=""
 while [ -z "${outcome}" ]; do
-	succeeded="$(kc -n "${NAMESPACE}" get job "${JOB_NAME}" -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
-	failed="$(kc -n "${NAMESPACE}" get job "${JOB_NAME}" -o jsonpath='{.status.failed}' 2>/dev/null || true)"
+	# One read, and its exit status is kept. `|| true` on each counter made a
+	# deleted Job or a transient API error indistinguishable from a running one,
+	# so the loop waited out the whole TIMEOUT instead of failing fast.
+	if ! state="$(kc -n "${NAMESPACE}" get job "${JOB_NAME}" \
+		--ignore-not-found -o jsonpath='{.status.succeeded} {.status.failed}' 2>/dev/null)"; then
+		outcome=unreachable
+		break
+	fi
+	if [ -z "${state}" ]; then
+		outcome=gone
+		break
+	fi
+	succeeded="${state%% *}"
+	failed="${state##* }"
 	if [ "${succeeded:-0}" -ge 1 ]; then
 		outcome=succeeded
 	elif [ "${failed:-0}" -ge 1 ]; then
@@ -147,7 +182,15 @@ fi
 
 echo "build-cluster: job ${NAMESPACE}/${JOB_NAME} ${outcome}; last log lines:" >&2
 logs --tail=100 >&2
-if [ "${outcome}" = timeout ]; then
+case "${outcome}" in
+timeout)
 	die "job ${NAMESPACE}/${JOB_NAME} did not finish within ${TIMEOUT}s (+120s grace)"
-fi
+	;;
+gone)
+	die "job ${NAMESPACE}/${JOB_NAME} disappeared while it was being watched; it was deleted, or ttlSecondsAfterFinished elapsed"
+	;;
+unreachable)
+	die "cannot read job ${NAMESPACE}/${JOB_NAME}; kubectl failed, so its outcome is unknown — check ${KUBE_HINT} -n ${NAMESPACE} get job ${JOB_NAME}"
+	;;
+esac
 die "job ${NAMESPACE}/${JOB_NAME} failed"

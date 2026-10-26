@@ -18,6 +18,8 @@
 #   __PUSH_SECRET__        name of the dockerconfigjson secret to mount
 #   __DEADLINE_SECONDS__   Job deadline in seconds
 #   __SOURCE_DATE_EPOCH__  commit timestamp, decimal seconds
+#   __BUILD_DATE__         __SOURCE_DATE_EPOCH__ as ISO 8601 UTC
+#   __DOCKER_REGISTRY__    registry the Dockerfile pulls its base images from
 #
 # Prerequisite (not created by this manifest): a kubernetes.io/dockerconfigjson
 # secret in the build namespace, named by __PUSH_SECRET__, holding a credential
@@ -43,6 +45,10 @@ spec:
         app.kubernetes.io/version: "__TAG__"
     spec:
       restartPolicy: Never
+      # The build container runs repository-controlled Dockerfile code with
+      # seccomp and AppArmor unconfined, so it is given nothing it does not
+      # need — starting with a service-account token it never uses.
+      automountServiceAccountToken: false
       initContainers:
         - name: clone
           image: alpine/git:v2.54.0@sha256:e8ceedc73bd80992ae8d58a7d24c58b8322146c354f1d2e81a97db4452068ec0
@@ -55,6 +61,8 @@ spec:
               git -C /src fetch -q --depth=1 origin "$2"
               git -C /src checkout -q --detach FETCH_HEAD
               git -C /src log -1 --format=%ct > /meta/source-date-epoch
+              git -C /src rev-parse --short HEAD > /meta/git-commit
+              git -C /src describe --tags --always --dirty > /meta/git-version
               echo "cloned $1 at $2: $(git -C /src rev-parse HEAD) epoch=$(cat /meta/source-date-epoch)"
             - clone
             - "__REPO_URL__"
@@ -97,6 +105,10 @@ spec:
                 --opt filename=__DOCKERFILE__ \
                 --opt platform=linux/amd64 \
                 --opt build-arg:SOURCE_DATE_EPOCH=__SOURCE_DATE_EPOCH__ \
+                --opt build-arg:BUILD_GIT_VERSION="$(cat /meta/git-version)" \
+                --opt build-arg:BUILD_GIT_COMMIT="$(cat /meta/git-commit)" \
+                --opt build-arg:BUILD_DATE=__BUILD_DATE__ \
+                --opt build-arg:DOCKER_REGISTRY=__DOCKER_REGISTRY__ \
                 --metadata-file /meta/metadata.json \
                 --output type=image,name=__IMAGE__:__TAG__,push=__PUSH__,rewrite-timestamp=true
               cat /meta/metadata.json
