@@ -63,7 +63,7 @@ spec:
               git -C /src log -1 --format=%ct > /meta/source-date-epoch
               git -C /src rev-parse --short HEAD > /meta/git-commit
               git -C /src describe --tags --always --dirty > /meta/git-version
-              echo "cloned $1 at $2: $(git -C /src rev-parse HEAD) epoch=$(cat /meta/source-date-epoch)"
+              echo "cloned $2 at $(git -C /src rev-parse HEAD) epoch=$(cat /meta/source-date-epoch)"
             - clone
             - "__REPO_URL__"
             - "__REF__"
@@ -141,6 +141,11 @@ spec:
             # writable.
             - name: buildkitd
               mountPath: /home/user/.local/share/buildkit
+            # The push credential is reachable from inside this container: with
+            # no process sandbox the build steps share its PID namespace, so a
+            # Dockerfile could read /proc/<pid>/root/docker-config/config.json.
+            # The trust assumption is that the Dockerfile being built is this
+            # repository's own, and the token is scoped to registry push.
             - name: docker-config
               mountPath: /docker-config
               readOnly: true

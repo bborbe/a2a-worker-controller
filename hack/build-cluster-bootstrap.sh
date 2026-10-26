@@ -12,7 +12,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE="${TEMPLATE:-${SCRIPT_DIR}/dockerconfig.json.tpl}"
 
 BUILD_TARGET="${1:-}"
-NAMESPACE="${NAMESPACE:-build}"
+# The Makefile exposes this knob as BUILD_NAMESPACE and passes it to
+# hack/build-cluster.sh as NAMESPACE. Accept either spelling here, or a
+# non-default BUILD_NAMESPACE provisions the secret into `build` while the Job
+# lands in the requested namespace and fails on a missing secret.
+NAMESPACE="${BUILD_NAMESPACE:-${NAMESPACE:-build}}"
 BUILD_PUSH_SECRET="${BUILD_PUSH_SECRET:-buildkit-push}"
 
 die() {
@@ -48,7 +52,9 @@ kc create namespace "${NAMESPACE}" --dry-run=client -o yaml | kc apply -f -
 echo "build-cluster-bootstrap: namespace ${NAMESPACE} present"
 
 # The lookup key comes from the template, so the template stays the single
-# declaration of which TeamVault item and which registry this secret is for.
+# declaration of which TeamVault item this secret is for. The registry host is
+# not read from it — docker.io's canonical auths key is hardcoded below — so a
+# template repointed at another registry would disagree with this secret.
 TEAMVAULT_KEY="$(sed -nE 's/.*"([A-Za-z0-9]{6,12})" \| teamvaultUser.*/\1/p' "${TEMPLATE}" | head -1)"
 [ -n "${TEAMVAULT_KEY}" ] || die "no teamvaultUser lookup key found in ${TEMPLATE}"
 

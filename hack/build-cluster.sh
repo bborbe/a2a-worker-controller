@@ -67,6 +67,12 @@ check_value TAG "${TAG}" '^[A-Za-z0-9._-]+$'
 check_value IMAGE "${IMAGE}" '^[A-Za-z0-9._/:-]+$'
 check_value DOCKER_REGISTRY "${DOCKER_REGISTRY}" '^[A-Za-z0-9._:/-]+$'
 check_value REPO_URL "${REPO_URL}" '^[A-Za-z0-9._/:@-]+$'
+# A URL carrying userinfo is rendered into the Job spec, where anyone who can
+# read the namespace recovers it. SCP-style git@host:path has no `://`, so it is
+# unaffected; a private repository should mount a credential instead.
+case "${REPO_URL}" in
+*://*@*) die "REPO_URL must not embed credentials; use a credential the Job can mount" ;;
+esac
 check_value DOCKERFILE "${DOCKERFILE}" '^[A-Za-z0-9._/-]+$'
 check_value PUSH_SECRET "${PUSH_SECRET}" '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
 check_value NAMESPACE "${NAMESPACE}" '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
@@ -141,7 +147,9 @@ if ! kc apply -f "${rendered}"; then
 	die "could not create job ${NAMESPACE}/${JOB_NAME}"
 fi
 
-deadline=$(( $(date +%s) + TIMEOUT + 120 ))
+# 10# forces base 10: a leading zero would otherwise be read as octal, so
+# BUILD_TIMEOUT=0600 would mean 384 seconds and 0800 would abort outright.
+deadline=$(( $(date +%s) + 10#${TIMEOUT} + 120 ))
 outcome=""
 while [ -z "${outcome}" ]; do
 	# One read, and its exit status is kept. `|| true` on each counter made a
