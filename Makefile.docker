@@ -19,28 +19,31 @@ BUILD_PUSH_SECRET ?= buildkit-push
 # move onto a cluster — so fall back to the commit SHA, which the Job can fetch.
 BUILD_REF ?= $(shell git symbolic-ref -q --short HEAD || git rev-parse HEAD)
 
-# A make value reaches the shell by textual substitution, so one carrying a single
-# quote would close its assignment and the remainder would run as shell — a branch
-# named `feat/x'; cmd; '` would execute cmd on the operator's host, and both quotes
-# and semicolons are legal in a git refname. hack/build-cluster.sh whitelists every
-# value it renders, but that check runs after the shell has already parsed this line,
-# so the quote is refused here, before it is interpolated.
+# A make value reaches the shell by textual substitution, so one carrying a quote would
+# close its assignment and the remainder would run as shell — a branch named
+# `feat/x'; cmd; '` would execute cmd on the operator's host, and both quotes and
+# semicolons are legal in a git refname. hack/build-cluster.sh whitelists every value it
+# renders, but that check runs after the shell has already parsed this line. The guard
+# therefore sits ABOVE the arm split, so it covers the local arm too: that arm pastes
+# BRANCH into `docker build` unquoted, where a `;` alone is enough.
+BUILD_VALUES = $(BUILD_TARGET)$(BUILD_NAMESPACE)$(BUILD_REPO_URL)$(BUILD_REF)$(BRANCH)$(BUILD_DOCKERFILE)$(DOCKER_REGISTRY)$(SERVICE)$(BUILD_PUSH_SECRET)$(BUILD_TIMEOUT)
+
 .PHONY: build
 build:
+	@$(if $(findstring ',$(BUILD_VALUES))$(findstring ",$(BUILD_VALUES)),$(error a build value contains a quote character; refusing to interpolate it into a shell command),)
 ifeq ($(BUILD_TARGET),local)
 	DOCKER_BUILDKIT=1 \
 	docker build \
 	--rm=true \
 	--platform=linux/amd64 \
-	--build-arg DOCKER_REGISTRY=$(DOCKER_REGISTRY) \
-	--build-arg BRANCH=$(BRANCH) \
+	--build-arg DOCKER_REGISTRY="$(DOCKER_REGISTRY)" \
+	--build-arg BRANCH="$(BRANCH)" \
 	--build-arg BUILD_GIT_VERSION=$$(git describe --tags --always --dirty) \
 	--build-arg BUILD_GIT_COMMIT=$$(git rev-parse --short HEAD) \
 	--build-arg BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
-	-t $(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH) \
+	-t "$(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH)" \
 	-f Dockerfile .
 else
-	@$(if $(findstring ',$(BUILD_TARGET)$(BUILD_NAMESPACE)$(BUILD_REPO_URL)$(BUILD_REF)$(BRANCH)$(BUILD_DOCKERFILE)$(DOCKER_REGISTRY)$(SERVICE)$(BUILD_PUSH_SECRET)$(BUILD_TIMEOUT)),$(error a build value contains a single quote; refusing to interpolate it into a shell command),)
 	BUILD_TARGET='$(BUILD_TARGET)' \
 	NAMESPACE='$(BUILD_NAMESPACE)' \
 	REPO_URL='$(BUILD_REPO_URL)' \
