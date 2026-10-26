@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: `BUILD_TARGET` selects where `make build` runs — `local` (the default) keeps the Docker daemon, any other value builds in that cluster as a Job rendered from `hack/build-job.yaml`, so the release image no longer needs the Mac
+
 ## v0.17.0
 
 - feat: `EGRESS_ALLOW` can name an external destination, so a worker whose task needs the public internet has a way to be given it. An entry of the form `cidr=<CIDR>:port` becomes an `ipBlock` peer in the worker's NetworkPolicy (`cidr=140.82.112.0/20:443`), IPv4 or IPv6, with the port split at the last colon so an address that contains colons is not cut in half. The CIDR is normalised to its network address, so `140.82.112.5/20` and `140.82.112.0/20` produce **the same** rule rather than two spellings of one destination — they are not deduplicated, and listing both yields two identical rules. Before this, `ParseEgressDestinations` accepted only `namespace[/key=value]:port`, so every destination had to be a namespace inside the cluster — which made a `make check` impossible on a worker, since it clones from github.com, fetches modules from proxy.golang.org and pulls trivy's database from ghcr.io. ⚠️ A NetworkPolicy matches addresses and never names, so the operator lists a provider's published ranges; a provider that moves its addresses needs that list updated. ⚠️ A CIDR that overlaps the cluster's own pod network defeats the namespace/label scoping this list otherwise gives, and `0.0.0.0/0` is accepted verbatim — the blast radius is the operator's to judge. The default stays an empty allow list, so no existing worker gains reach it did not already have.

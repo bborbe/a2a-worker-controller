@@ -1,7 +1,24 @@
 DIRS += $(shell find */* -maxdepth 0 -name Makefile -exec dirname "{}" \;)
 
+# BUILD_TARGET selects where `make build` runs. `local` (the default) uses the
+# local Docker daemon; any other value must name a kubectl context and builds
+# inside that cluster as a Job rendered from hack/build-job.yaml.
+BUILD_TARGET ?= local
+BUILD_NAMESPACE ?= build
+BUILD_TIMEOUT ?= 3600
+BUILD_REPO_URL ?= https://github.com/$(SERVICE).git
+BUILD_DOCKERFILE ?= Dockerfile
+BUILD_PUSH_SECRET ?= buildkit-push
+
+# What the Job clones. BRANCH cannot serve: Makefile.variables sanitizes it for
+# use as an image tag (`feat/build-target` becomes `feat-build-target`), so a Job
+# told to clone $(BRANCH) would ask for a branch that does not exist. BUILD_REF
+# keeps the real ref and is independent of the tag the image is pushed under.
+BUILD_REF ?= $(shell git rev-parse --abbrev-ref HEAD)
+
 .PHONY: build
 build:
+ifeq ($(BUILD_TARGET),local)
 	DOCKER_BUILDKIT=1 \
 	docker build \
 	--rm=true \
@@ -13,15 +30,36 @@ build:
 	--build-arg BUILD_DATE=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
 	-t $(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH) \
 	-f Dockerfile .
+else
+	BUILD_TARGET='$(BUILD_TARGET)' \
+	NAMESPACE='$(BUILD_NAMESPACE)' \
+	REPO_URL='$(BUILD_REPO_URL)' \
+	REF='$(BUILD_REF)' \
+	TAG='$(BRANCH)' \
+	DOCKERFILE='$(BUILD_DOCKERFILE)' \
+	IMAGE='$(DOCKER_REGISTRY)/$(SERVICE)' \
+	PUSH='true' \
+	PUSH_SECRET='$(BUILD_PUSH_SECRET)' \
+	TIMEOUT='$(BUILD_TIMEOUT)' \
+	hack/build-cluster.sh
+endif
 
+# A remote target pushes from inside the cluster and never loads the image on
+# this machine, so there is nothing here to push and nothing to remove. Guard
+# both, or `make buca BUILD_TARGET=<cluster>` fails at the push step after a
+# build that actually succeeded — with "An image does not exist locally".
 .PHONY: upload
 upload:
+ifeq ($(BUILD_TARGET),local)
 	docker push $(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH)
+endif
 
 .PHONY: clean
 clean:
+ifeq ($(BUILD_TARGET),local)
 	docker rmi $(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH) || true
 	docker builder prune --max-used-space 21474836480 -f || true
+endif
 
 .PHONY: apply
 apply:
