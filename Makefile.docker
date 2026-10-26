@@ -74,13 +74,13 @@ endif
 .PHONY: upload
 upload:
 ifeq ($(BUILD_TARGET),local)
-	docker push $(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH)
+	docker push "$(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH)"
 endif
 
 .PHONY: clean
 clean:
 ifeq ($(BUILD_TARGET),local)
-	docker rmi $(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH) || true
+	docker rmi "$(DOCKER_REGISTRY)/$(SERVICE):$(BRANCH)" || true
 	docker builder prune --max-used-space 21474836480 -f || true
 endif
 

@@ -1,9 +1,13 @@
 include Makefile.variables
 include Makefile.precommit
-include Makefile.docker
 include example.env
 
 SERVICE = bborbe/a2a-worker-controller
+
+# Included AFTER SERVICE and the variables it renders are assigned: Makefile.docker's
+# guard is evaluated at parse time, so including it above this block would check empty
+# values, pass, and let them through to the shell lines that interpolate them.
+include Makefile.docker
 
 run:
 	@go run -mod=mod main.go \

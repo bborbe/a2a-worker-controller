@@ -115,13 +115,16 @@ unset TV_USER TV_PASS
 # --server-side: client-side apply records the whole applied manifest — including
 # .data.dockerconfigjson — in the kubectl.kubernetes.io/last-applied-configuration
 # annotation, where it outlives a rotation and is exported by tooling and backups that
-# redact .data but not annotations. Server-side apply tracks field ownership instead of
-# values, so the credential stays only in .data.
+# redact .data but not annotations. --force-conflicts is required on any cluster
+# provisioned by the previous client-side version, whose field manager owns the field;
+# and SSA does not remove the annotation that version wrote, so it is deleted here.
 kc create secret generic "${BUILD_PUSH_SECRET}" \
 	-n "${NAMESPACE}" \
 	--type=kubernetes.io/dockerconfigjson \
 	--from-file=.dockerconfigjson="${RENDERED}" \
-	--dry-run=client -o yaml | kc apply --server-side -f -
+	--dry-run=client -o yaml | kc apply --server-side --force-conflicts -f -
+kc annotate secret "${BUILD_PUSH_SECRET}" -n "${NAMESPACE}" \
+	kubectl.kubernetes.io/last-applied-configuration- --overwrite >/dev/null
 echo "build-cluster-bootstrap: secret ${NAMESPACE}/${BUILD_PUSH_SECRET} present"
 
 echo "build-cluster-bootstrap: ready — make build BUILD_TARGET=${BUILD_TARGET}"
