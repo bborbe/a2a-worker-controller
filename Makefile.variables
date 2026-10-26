@@ -7,7 +7,10 @@
 # with a -dirty marker when the tree is dirty. Every fallback is sanitised like the
 # branch path, because a tag may contain '/'.
 # On a branch this is byte-identical to the old command: same ref, same sanitisation.
-BRANCH ?= $(shell b=$$(git symbolic-ref -q --short HEAD); if [ -n "$$b" ]; then printf '%s' "$$b" | tr '/' '-'; else t=$$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1); if [ -n "$$t" ]; then printf '%s' "$$t" | tr '/' '-'; else s=$$(git rev-parse --short HEAD); git diff --quiet HEAD 2>/dev/null || s="$$s-dirty"; printf '%s' "$$s" | tr '/' '-'; fi; fi)
+# The sanitiser is a full replacement of everything outside Docker's tag grammar, not
+# just '/' -> '-': a refname may also carry '+', which is legal in git and illegal in
+# a tag, and would otherwise fail at the push.
+BRANCH ?= $(shell b=$$(git symbolic-ref -q --short HEAD); if [ -n "$$b" ]; then printf '%s' "$$b" | sed -e 's/[^A-Za-z0-9_.-]/-/g'; else t=$$(git tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | head -1); if [ -n "$$t" ]; then printf '%s' "$$t" | sed -e 's/[^A-Za-z0-9_.-]/-/g'; else s=$$(git rev-parse --short HEAD); git diff --quiet HEAD 2>/dev/null || s="$$s-dirty"; printf '%s' "$$s" | sed -e 's/[^A-Za-z0-9_.-]/-/g'; fi; fi)
 HOSTNAME ?= $(shell hostname -s)
 ROOTDIR ?= $(shell git rev-parse --show-toplevel)
 TEAMVAULT ?= ~/.teamvault.json
