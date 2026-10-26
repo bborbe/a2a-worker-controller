@@ -149,12 +149,25 @@ if kc -n "${NAMESPACE}" get job "${JOB_NAME}" --ignore-not-found -o name | grep 
 	# build-fix-retry loop this feature exists to serve. Only a still-running Job
 	# is a real conflict: two builds of one tag racing. Replace a terminal Job;
 	# refuse a live one.
-	terminal="$(kc -n "${NAMESPACE}" get job "${JOB_NAME}" \
-		-o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type}{"\n"}{end}' 2>/dev/null || true)"
+	# The read's exit status is kept: `2>/dev/null || true` would collapse a transient
+	# API error into an empty string, which the case below would then report as
+	# "still running" — the same conflation the wait loop further down avoids.
+	if ! terminal="$(kc -n "${NAMESPACE}" get job "${JOB_NAME}" \
+		-o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type}{"\n"}{end}')"; then
+		die "cannot read job ${NAMESPACE}/${JOB_NAME} to decide whether it is finished; retry, or delete it with: ${KUBE_HINT} -n ${NAMESPACE} delete job ${JOB_NAME}"
+	fi
 	case "${terminal}" in
-	*Complete* | *Failed*)
+	# SuccessCriteriaMet and FailureTarget are the delayed-terminal-condition markers:
+	# the controller sets them seconds before Complete/Failed, and a retry landing in
+	# that window would otherwise be refused as "still running".
+	*Complete* | *Failed* | *SuccessCriteriaMet* | *FailureTarget*)
 		echo "build-cluster: replacing finished job ${NAMESPACE}/${JOB_NAME}"
-		kc -n "${NAMESPACE}" delete job "${JOB_NAME}" --wait=true >/dev/null
+		# Foreground cascade, so the old Job's pods are gone before the new Job's logs
+		# are selected by the job-name label — otherwise a failed retry interleaves the
+		# previous run's lines. --ignore-not-found covers the TTL elapsing between the
+		# read above and this delete: a missing Job is the desired end state.
+		kc -n "${NAMESPACE}" delete job "${JOB_NAME}" \
+			--cascade=foreground --wait=true --ignore-not-found >/dev/null
 		;;
 	*)
 		die "job ${NAMESPACE}/${JOB_NAME} is still running; wait for it or delete it with: ${KUBE_HINT} -n ${NAMESPACE} delete job ${JOB_NAME}"
