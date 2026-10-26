@@ -7,6 +7,8 @@ Please choose versions by [Semantic Versioning](http://semver.org/).
 ## Unreleased
 
 - feat: `BUILD_TARGET` selects where `make build` runs — `local` (the default) keeps the Docker daemon, any other value builds in that cluster as a Job rendered from `hack/build-job.yaml`, so the release image no longer needs the Mac
+- fix: `hack/build-cluster-bootstrap.sh` passes the push credential to `jq` through the environment instead of argv, reads the registry auths key from the template instead of hardcoding docker.io's, checks for a missing kubeconfig the way the runner does, and resolves the CLI's config in the order teamvault-cli documents. The auths-key extraction no longer aborts the script silently when the template carries no `https://` key: a bare host is a valid dockerconfigjson key, and `grep` exiting 1 under `set -e` killed the script before its own guard could name the problem
+- fix: a finished build Job is replaced rather than blocking the next build of the same tag. It keeps its name for `ttlSecondsAfterFinished` (24h), so the previous outright refusal made the retry after a failed build — the ordinary build-fix-retry loop — impossible without a manual `kubectl delete job`. A still-running Job is still refused, which is the conflict that guard exists for. `BRANCH` also falls back to the tag in a detached checkout instead of resolving to the literal `HEAD`, so a release build no longer pushes an image tagged `HEAD`; `TIMEOUT` goes through the same newline-rejecting check as every other rendered value; and an ambient `SOURCE_DATE_EPOCH` that disagrees with the commit now fails on the Mac instead of inside the cluster
 
 ## v0.17.0
 

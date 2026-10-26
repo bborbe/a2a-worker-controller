@@ -32,9 +32,27 @@ die() {
 # teamvault-config-parser consumes that. This script needs the CLI instead (see the
 # note below), so it needs the CLI's config. Deliberately a different variable name:
 # a TEAMVAULT exported by the make environment would otherwise silently point this
-# at the parser's file.
-TEAMVAULT_CLI_CONFIG="${TEAMVAULT_CLI_CONFIG:-${HOME}/.config/teamvault-cli/config.json}"
-[ -f "${TEAMVAULT_CLI_CONFIG}" ] || die "teamvault-cli config not found: ${TEAMVAULT_CLI_CONFIG} (set TEAMVAULT_CLI_CONFIG to override)"
+# at the parser's file. Resolution follows the order teamvault-cli documents —
+# $TEAMVAULT_CONFIG, then ~/.config/teamvault-cli/config.json, then ~/.teamvault.json
+# — so an operator who configured the CLI that way is not told its config is missing.
+if [ -z "${TEAMVAULT_CLI_CONFIG:-}" ]; then
+	for candidate in "${TEAMVAULT_CONFIG:-}" \
+		"${HOME}/.config/teamvault-cli/config.json" \
+		"${HOME}/.teamvault.json"; do
+		[ -n "${candidate}" ] || continue
+		if [ -f "${candidate}" ]; then
+			TEAMVAULT_CLI_CONFIG="${candidate}"
+			break
+		fi
+	done
+fi
+[ -n "${TEAMVAULT_CLI_CONFIG:-}" ] ||
+	die "no teamvault-cli config found (set TEAMVAULT_CLI_CONFIG, or TEAMVAULT_CONFIG as the CLI reads it)"
+# An explicit override short-circuits the loop above, so the resolved path is tested
+# here. The hand-typed value is exactly the case a human gets wrong, and it deserves
+# the named diagnostic rather than whatever teamvault-cli prints.
+[ -f "${TEAMVAULT_CLI_CONFIG}" ] ||
+	die "teamvault-cli config not found: ${TEAMVAULT_CLI_CONFIG}"
 command -v teamvault-cli >/dev/null 2>&1 ||
 	die "teamvault-cli not found on PATH; it resolves the lookup key in ${TEMPLATE}"
 
@@ -61,15 +79,18 @@ echo "build-cluster-bootstrap: cluster ${BUILD_TARGET} (kubectl context ${KUBE_C
 kc create namespace "${NAMESPACE}" --dry-run=client -o yaml | kc apply -f -
 echo "build-cluster-bootstrap: namespace ${NAMESPACE} present"
 
-# Both the TeamVault item and the registry host come from the template, so it stays
-# the single declaration of what this secret is for. Reading the host rather than
-# hardcoding docker.io's means a template repointed at another registry cannot
-# render the credential under the wrong auths key and fail later with a generic
-# authentication error.
+# Both the TeamVault item and the registry host come from the template, so the two
+# cannot disagree: a template repointed at another registry renders the credential
+# under that registry's auths key. This does not tie the secret to the registry the
+# Job actually pushes to (DOCKER_REGISTRY) — keep those in step when either changes.
 TEAMVAULT_KEY="$(sed -nE 's/.*"([A-Za-z0-9]{6,12})" \| teamvaultUser.*/\1/p' "${TEMPLATE}" | head -1)"
 [ -n "${TEAMVAULT_KEY}" ] || die "no teamvaultUser lookup key found in ${TEMPLATE}"
-AUTHS_KEY="$(grep -oE 'https?://[^"]+' "${TEMPLATE}" | head -1)"
-[ -n "${AUTHS_KEY}" ] || die "no registry auths key found in ${TEMPLATE}"
+# `|| true` is load-bearing: grep exits 1 when nothing matches, pipefail propagates
+# that through `head`, and `set -e` would kill the script at this assignment — before
+# the guard below could name the problem. A bare-host auths key (registry.example.com
+# rather than an https:// URL) is valid dockerconfigjson, so the no-match path is real.
+AUTHS_KEY="$(grep -oE 'https?://[^"]+' "${TEMPLATE}" | head -1 || true)"
+[ -n "${AUTHS_KEY}" ] || die "no https://-prefixed auths key found in ${TEMPLATE} (a bare host is valid dockerconfigjson, but this extraction cannot read it)"
 
 # teamvault-cli, not teamvault-config-parser: the parser takes its password from
 # the config file, which holds only url and user, so it authenticates unprivileged
@@ -82,7 +103,8 @@ TV_PASS="$(teamvault-cli password --teamvault-config "${TEAMVAULT_CLI_CONFIG}" -
 # produce malformed JSON or inject a second auths entry — printf '%s' would do both.
 # The credential reaches jq through the environment, never argv: `ps` shows a
 # process's arguments to every local user, and the temp file's promise above covers
-# echoing and logging but not that third channel.
+# echoing and logging but not that third channel. Reading them back needs jq >= 1.6,
+# which provides env/0; older builds fail with jq's own `env/0 is not defined`.
 command -v jq >/dev/null 2>&1 || die "jq not found on PATH; it JSON-encodes the credential"
 TV_USER="${TV_USER}" TV_PASS="${TV_PASS}" jq -n --arg key "${AUTHS_KEY}" \
 	'{auths:{($key):{username:env.TV_USER,password:env.TV_PASS}}}' >"${RENDERED}"

@@ -76,8 +76,9 @@ esac
 check_value DOCKERFILE "${DOCKERFILE}" '^[A-Za-z0-9._/-]+$'
 check_value PUSH_SECRET "${PUSH_SECRET}" '^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$'
 check_value NAMESPACE "${NAMESPACE}" '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
-printf '%s' "${TIMEOUT}" | grep -qE '^[0-9]+$' ||
-	die "TIMEOUT '${TIMEOUT}' is not a number of seconds"
+# Through check_value, not a bare printf|grep: that form accepts a value carrying an
+# embedded newline, and this value is rendered into activeDeadlineSeconds.
+check_value TIMEOUT "${TIMEOUT}" '^[0-9]+$'
 case "${PUSH}" in
 true | false) ;;
 *) die "PUSH '${PUSH}' must be true or false" ;;
@@ -97,9 +98,15 @@ printf '%s\n' "${contexts}" | grep -qxF "${KUBE_CONTEXT}" ||
 # The build clock is the built commit's timestamp. It is rendered literally so
 # the Job states the epoch it will use; the init container re-derives it from
 # the cloned commit and the build container refuses to run on a mismatch.
-if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
-	SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "${REF}" 2>/dev/null || true)"
+commit_epoch="$(git log -1 --format=%ct "${REF}" 2>/dev/null || true)"
+# An ambient SOURCE_DATE_EPOCH stays honoured as an escape hatch, but only when it
+# agrees with the commit. The Job states the epoch it will use and the build container
+# refuses on a mismatch, so a stale exported value would fail *inside* the cluster with
+# "run git fetch and retry" — advice that cannot fix an exported variable.
+if [ -n "${SOURCE_DATE_EPOCH:-}" ] && [ -n "${commit_epoch}" ] && [ "${SOURCE_DATE_EPOCH}" != "${commit_epoch}" ]; then
+	die "SOURCE_DATE_EPOCH ${SOURCE_DATE_EPOCH} disagrees with ${REF}'s commit epoch ${commit_epoch}; unset it, or set it to that value"
 fi
+[ -n "${SOURCE_DATE_EPOCH:-}" ] || SOURCE_DATE_EPOCH="${commit_epoch}"
 printf '%s' "${SOURCE_DATE_EPOCH}" | grep -qE '^[0-9]+$' ||
 	die "cannot resolve REF '${REF}' to a commit in the local repository; run git fetch and retry"
 
@@ -136,7 +143,23 @@ sed \
 	"${TEMPLATE}" >"${rendered}"
 
 if kc -n "${NAMESPACE}" get job "${JOB_NAME}" --ignore-not-found -o name | grep -q .; then
-	die "job ${NAMESPACE}/${JOB_NAME} already exists; delete it with: ${KUBE_HINT} -n ${NAMESPACE} delete job ${JOB_NAME}"
+	# A finished Job keeps its name until ttlSecondsAfterFinished elapses (24h), so
+	# refusing on any collision makes the second build of a tag impossible —
+	# including the retry after a failed one, which is the ordinary
+	# build-fix-retry loop this feature exists to serve. Only a still-running Job
+	# is a real conflict: two builds of one tag racing. Replace a terminal Job;
+	# refuse a live one.
+	terminal="$(kc -n "${NAMESPACE}" get job "${JOB_NAME}" \
+		-o jsonpath='{range .status.conditions[?(@.status=="True")]}{.type}{"\n"}{end}' 2>/dev/null || true)"
+	case "${terminal}" in
+	*Complete* | *Failed*)
+		echo "build-cluster: replacing finished job ${NAMESPACE}/${JOB_NAME}"
+		kc -n "${NAMESPACE}" delete job "${JOB_NAME}" --wait=true >/dev/null
+		;;
+	*)
+		die "job ${NAMESPACE}/${JOB_NAME} is still running; wait for it or delete it with: ${KUBE_HINT} -n ${NAMESPACE} delete job ${JOB_NAME}"
+		;;
+	esac
 fi
 
 if ! kc apply -f "${rendered}"; then

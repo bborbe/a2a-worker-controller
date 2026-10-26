@@ -1,4 +1,10 @@
-BRANCH ?= $(shell git rev-parse --abbrev-ref HEAD | tr '/' '-')
+# `git rev-parse --abbrev-ref` prints the literal "HEAD" in a detached checkout — the
+# state after `git checkout <tag>`, which is how a release is built — and this value is
+# the image tag, the build Job's name and the deploy manifest's BRANCH substitution, so
+# "HEAD" would name an image nothing can pull. Fall back to the tag (or the short SHA
+# when HEAD is untagged) so all three agree. On a branch this is byte-identical to the
+# old command: same ref, same '/' sanitisation.
+BRANCH ?= $(shell b=$$(git symbolic-ref -q --short HEAD); if [ -n "$$b" ]; then printf '%s' "$$b" | tr '/' '-'; else git describe --tags --always --dirty; fi)
 HOSTNAME ?= $(shell hostname -s)
 ROOTDIR ?= $(shell git rev-parse --show-toplevel)
 TEAMVAULT ?= ~/.teamvault.json
