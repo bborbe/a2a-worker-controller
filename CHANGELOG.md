@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- chore: update github.com/bborbe/agent-task-executor to v0.55.1, github.com/bborbe/errors to v1.6.6, github.com/bborbe/http to v1.26.32, github.com/bborbe/log to v1.7.6, github.com/bborbe/metrics to v0.6.9, github.com/bborbe/run to v1.11.10, github.com/bborbe/sentry to v1.10.7, github.com/bborbe/service to v1.11.2, github.com/bborbe/time to v1.27.25, github.com/bborbe/vault-cli to v0.186.1, github.com/onsi/ginkgo/v2 to v2.34.0, k8s.io/api to v0.38.0-alpha.3, k8s.io/apimachinery to v0.38.0-alpha.3, k8s.io/client-go to v0.38.0-alpha.3
+
 ## v0.18.0
 
 - feat: `BUILD_TARGET` selects where `make build` runs — `local` (the default) keeps the Docker daemon, any other value builds in that cluster as a Job rendered from `hack/build-job.yaml`, so the release image no longer needs the Mac
