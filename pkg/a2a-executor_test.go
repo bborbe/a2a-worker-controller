@@ -266,7 +266,10 @@ var _ = Describe("A2A surface", func() {
 			pkg.NewBackendProvider(pkg.NewStubWorkerBackend(), nil, nil),
 			pkg.BackendDocker,
 		)
-		handler := pkg.NewA2AHandler(executor)
+		handler := pkg.NewA2AHandler(
+			executor,
+			pkg.NewBoundedTaskStore(pkg.BoundedTaskStoreConfig{}),
+		)
 
 		body := `{"jsonrpc":"2.0","id":"1","method":"SendMessage","params":{"message":` +
 			`{"messageId":"m1","role":"ROLE_USER","parts":[{"data":{"operation":"list"}}]}}}`

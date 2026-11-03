@@ -9,6 +9,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv"
+	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
 )
 
 // A2APath is the route the A2A JSON-RPC binding is served at.
@@ -71,9 +72,11 @@ func NewAgentCardHandler(card *a2a.AgentCard) http.Handler {
 }
 
 // NewA2AHandler serves the A2A JSON-RPC binding over the given executor. The body is capped
-// before the SDK handler sees it.
-func NewA2AHandler(executor a2asrv.AgentExecutor) http.Handler {
-	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor))
+// before the SDK handler sees it, and every task the SDK stores goes to the supplied store —
+// without one the SDK falls back to an in-memory map with no delete, TTL or cap, which grows
+// by one entry per control call for the life of the process.
+func NewA2AHandler(executor a2asrv.AgentExecutor, store taskstore.Store) http.Handler {
+	inner := a2asrv.NewJSONRPCHandler(a2asrv.NewHandler(executor, a2asrv.WithTaskStore(store)))
 	return http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 		req.Body = http.MaxBytesReader(resp, req.Body, maxRequestBodyBytes)
 		inner.ServeHTTP(resp, req)
