@@ -9,7 +9,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/gob"
-	"errors"
+	stderrors "errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -19,6 +19,7 @@ import (
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 	"github.com/a2aproject/a2a-go/v2/a2asrv/taskstore"
+	"github.com/bborbe/errors"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -117,7 +118,7 @@ func NewTaskStoreEntriesGauge() prometheus.Gauge {
 	})
 	if err := prometheus.Register(gauge); err != nil {
 		var already prometheus.AlreadyRegisteredError
-		if errors.As(err, &already) {
+		if stderrors.As(err, &already) {
 			if existing, ok := already.ExistingCollector.(prometheus.Gauge); ok {
 				return existing
 			}
@@ -132,13 +133,13 @@ func (s *BoundedTaskStore) Create(
 	ctx context.Context,
 	task *a2a.Task,
 ) (taskstore.TaskVersion, error) {
-	if err := validateBoundedTask(task); err != nil {
+	if err := validateBoundedTask(ctx, task); err != nil {
 		return taskstore.TaskVersionMissing, err
 	}
 
 	userName, err := s.config.Authenticator(ctx)
 	if err != nil {
-		return taskstore.TaskVersionMissing, fmt.Errorf("taskstore auth failed: %w", err)
+		return taskstore.TaskVersionMissing, errors.Wrapf(ctx, err, "taskstore auth failed")
 	}
 
 	taskCopy, err := deepCopyTask(task)
@@ -169,13 +170,13 @@ func (s *BoundedTaskStore) Update(
 	ctx context.Context,
 	req *taskstore.UpdateRequest,
 ) (taskstore.TaskVersion, error) {
-	if err := validateBoundedTask(req.Task); err != nil {
+	if err := validateBoundedTask(ctx, req.Task); err != nil {
 		return taskstore.TaskVersionMissing, err
 	}
 
 	userName, err := s.config.Authenticator(ctx)
 	if err != nil {
-		return taskstore.TaskVersionMissing, fmt.Errorf("taskstore auth failed: %w", err)
+		return taskstore.TaskVersionMissing, errors.Wrapf(ctx, err, "taskstore auth failed")
 	}
 
 	taskCopy, err := deepCopyTask(req.Task)
@@ -221,7 +222,7 @@ func (s *BoundedTaskStore) Get(
 	// Mask an ownership mismatch as not-found, as the SDK does and A2A §3.3.2 requires.
 	userName, err := s.config.Authenticator(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("taskstore auth failed: %w", err)
+		return nil, errors.Wrapf(ctx, err, "taskstore auth failed")
 	}
 	if stored.user != userName {
 		return nil, a2a.ErrTaskNotFound
@@ -229,7 +230,7 @@ func (s *BoundedTaskStore) Get(
 
 	taskCopy, err := deepCopyTask(stored.task)
 	if err != nil {
-		return nil, fmt.Errorf("task copy failed: %w", err)
+		return nil, errors.Wrapf(ctx, err, "task copy failed")
 	}
 
 	return &taskstore.StoredTask{Task: taskCopy, Version: stored.version, User: stored.user}, nil
@@ -251,10 +252,11 @@ func (s *BoundedTaskStore) List(
 	if pageSize == 0 {
 		pageSize = defaultPageSize
 	} else if pageSize < 1 || pageSize > 100 {
-		return nil, fmt.Errorf(
-			"page size must be between 1 and 100 inclusive, got %d: %w",
-			pageSize,
+		return nil, errors.Wrapf(
+			ctx,
 			a2a.ErrInvalidRequest,
+			"page size must be between 1 and 100 inclusive, got %d",
+			pageSize,
 		)
 	}
 
@@ -475,60 +477,64 @@ func deepCopyTask(task *a2a.Task) (*a2a.Task, error) {
 // validateBoundedTask mirrors the SDK's own task validation, which is unexported. Skipping
 // it would make this store accept a task the SDK's store rejects, which is a behaviour
 // change in exactly the dimension the bounded store must preserve.
-func validateBoundedTask(task *a2a.Task) error {
+func validateBoundedTask(ctx context.Context, task *a2a.Task) error {
 	if task == nil {
 		return nil
 	}
-	if err := validateBoundedMessage(task.Status.Message); err != nil {
+	if err := validateBoundedMessage(ctx, task.Status.Message); err != nil {
 		return err
 	}
 	for _, msg := range task.History {
-		if err := validateBoundedMessage(msg); err != nil {
+		if err := validateBoundedMessage(ctx, msg); err != nil {
 			return err
 		}
 	}
 	for _, artifact := range task.Artifacts {
-		if err := validateBoundedArtifact(artifact); err != nil {
+		if err := validateBoundedArtifact(ctx, artifact); err != nil {
 			return err
 		}
 	}
-	return validateBoundedMeta(task.Metadata)
+	return validateBoundedMeta(ctx, task.Metadata)
 }
 
-func validateBoundedArtifact(artifact *a2a.Artifact) error {
+func validateBoundedArtifact(ctx context.Context, artifact *a2a.Artifact) error {
 	if artifact == nil {
 		return nil
 	}
-	if err := validateBoundedParts(artifact.Parts); err != nil {
+	if err := validateBoundedParts(ctx, artifact.Parts); err != nil {
 		return err
 	}
-	return validateBoundedMeta(artifact.Metadata)
+	return validateBoundedMeta(ctx, artifact.Metadata)
 }
 
-func validateBoundedMessage(msg *a2a.Message) error {
+func validateBoundedMessage(ctx context.Context, msg *a2a.Message) error {
 	if msg == nil {
 		return nil
 	}
-	if err := validateBoundedParts(msg.Parts); err != nil {
+	if err := validateBoundedParts(ctx, msg.Parts); err != nil {
 		return err
 	}
-	return validateBoundedMeta(msg.Metadata)
+	return validateBoundedMeta(ctx, msg.Metadata)
 }
 
-func validateBoundedParts(parts a2a.ContentParts) error {
+func validateBoundedParts(ctx context.Context, parts a2a.ContentParts) error {
 	for _, part := range parts {
-		if err := validateBoundedMeta(part.Meta()); err != nil {
+		if err := validateBoundedMeta(ctx, part.Meta()); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateBoundedMeta(meta map[string]any) error {
-	return validateBoundedMetaRecursive(meta, map[string]struct{}{})
+func validateBoundedMeta(ctx context.Context, meta map[string]any) error {
+	return validateBoundedMetaRecursive(ctx, meta, map[string]struct{}{})
 }
 
-func validateBoundedMetaRecursive(value any, processing map[string]struct{}) error {
+func validateBoundedMetaRecursive(
+	ctx context.Context,
+	value any,
+	processing map[string]struct{},
+) error {
 	if value == nil {
 		return nil
 	}
@@ -541,14 +547,14 @@ func validateBoundedMetaRecursive(value any, processing map[string]struct{}) err
 
 	key := fmt.Sprintf("%p", value)
 	if _, ok := processing[key]; ok {
-		return fmt.Errorf("circular reference in Metadata")
+		return errors.Errorf(ctx, "circular reference in Metadata")
 	}
 	processing[key] = struct{}{}
 	defer delete(processing, key)
 
 	if arr, ok := value.([]any); ok {
 		for _, elem := range arr {
-			if err := validateBoundedMetaRecursive(elem, processing); err != nil {
+			if err := validateBoundedMetaRecursive(ctx, elem, processing); err != nil {
 				return err
 			}
 		}
@@ -557,14 +563,15 @@ func validateBoundedMetaRecursive(value any, processing map[string]struct{}) err
 
 	if m, ok := value.(map[string]any); ok {
 		for _, elem := range m {
-			if err := validateBoundedMetaRecursive(elem, processing); err != nil {
+			if err := validateBoundedMetaRecursive(ctx, elem, processing); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 
-	return fmt.Errorf(
+	return errors.Errorf(
+		ctx,
 		"%T is not permitted in Metadata, must be one of nil, bool, int, float, string, []any, map[string]any",
 		value,
 	)
