@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.18.2
 
 - chore: update github.com/bborbe/vault-cli to v0.186.2
 
