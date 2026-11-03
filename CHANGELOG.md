@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- fix: bound the A2A task store with a TTL and a hard entry cap, so a control call no longer pins its task — including the worker's bearer token — in an in-memory map for the life of the process. The store reports its entry count as `a2a_task_store_entries` on `/metrics`, and the TTL and cap are configurable as `A2A_TASK_STORE_TTL` (default `5m`) and `A2A_TASK_STORE_MAX` (default `500`)
+
 ## v0.18.2
 
 - chore: update github.com/bborbe/vault-cli to v0.186.2
