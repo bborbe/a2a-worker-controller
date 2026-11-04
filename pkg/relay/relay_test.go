@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -347,5 +348,164 @@ var _ = Describe("relay", func() {
 
 			Expect(<-pulled).To(Equal(len(workers) * perWorker))
 		})
+
+		It("delivers every item exactly once when two pullers race", func() {
+			store := relay.NewStore(1000)
+			const total = 60
+
+			var pushing sync.WaitGroup
+			pushing.Add(1)
+			go func() {
+				defer pushing.Done()
+				for i := 0; i < total; i++ {
+					rec := httptest.NewRecorder()
+					relay.PushHandler(store).ServeHTTP(
+						rec,
+						push(fmt.Sprintf("tok-%d", i), fmt.Sprintf(`{"n":%d}`, i)),
+					)
+				}
+			}()
+
+			// Two pullers share one notify channel and one Drain. Drain is atomic, so the sets
+			// they receive must be disjoint — the spec is that nothing is lost and nothing
+			// arrives twice, which a single puller cannot show.
+			collected := make(chan string, total*2)
+			stop := make(chan struct{})
+			var pulling sync.WaitGroup
+			for p := 0; p < 2; p++ {
+				pulling.Add(1)
+				go func() {
+					defer pulling.Done()
+					for {
+						select {
+						case <-stop:
+							for _, item := range store.Drain() {
+								collected <- string(item.Body)
+							}
+							return
+						default:
+						}
+						rec := httptest.NewRecorder()
+						relay.PullHandler(store, secret).
+							ServeHTTP(rec, pull(secret, time.Millisecond))
+						var body struct {
+							Items []relay.Item `json:"items"`
+						}
+						Expect(json.NewDecoder(rec.Body).Decode(&body)).To(Succeed())
+						for _, item := range body.Items {
+							collected <- string(item.Body)
+						}
+					}
+				}()
+			}
+
+			pushing.Wait()
+			close(stop)
+			pulling.Wait()
+			close(collected)
+
+			expected := make([]string, 0, total)
+			for i := 0; i < total; i++ {
+				expected = append(expected, fmt.Sprintf(`{"n":%d}`, i))
+			}
+			bodies := make([]string, 0, total)
+			for body := range collected {
+				bodies = append(bodies, body)
+			}
+			// ConsistOf, not just a length: a duplicate plus a loss would keep the count right.
+			Expect(bodies).To(ConsistOf(expected))
+		})
+	})
+
+	Describe("in-flight guard", func() {
+		// MaxConcurrentPushes is the only bound on how much unauthenticated push data is
+		// buffered at once, because the handler reads a whole body before Store.Push applies
+		// any queue limit. A body that never finishes reading therefore pins one slot.
+		It("refuses a push once MaxConcurrentPushes bodies are still being read", func() {
+			store := relay.NewStore(1000)
+			handler := relay.PushHandler(store)
+
+			writers := make([]*io.PipeWriter, 0, relay.MaxConcurrentPushes)
+			for i := 0; i < relay.MaxConcurrentPushes; i++ {
+				reader, writer := io.Pipe()
+				writers = append(writers, writer)
+				req := httptest.NewRequest(http.MethodPost, relay.PushPath, reader)
+				req.Header.Set(relay.TokenHeader, fmt.Sprintf("tok-%d", i))
+				go func() {
+					handler.ServeHTTP(httptest.NewRecorder(), req)
+				}()
+			}
+			defer func() {
+				// Released even on failure, so a broken spec does not strand goroutines.
+				for _, writer := range writers {
+					_ = writer.CloseWithError(io.ErrUnexpectedEOF)
+				}
+			}()
+
+			// Eventually, not a bare call: each goroutine must reach the semaphore before the
+			// probe is meaningful, and the handler acquires it before reading anything.
+			Eventually(func() int {
+				rec := httptest.NewRecorder()
+				handler.ServeHTTP(rec, push("tok-over", `{}`))
+				return rec.Code
+			}).Should(Equal(http.StatusServiceUnavailable))
+		})
+	})
+
+	Describe("deployment settings", func() {
+		// The guard is what stands between a listener and an unauthenticated pull endpoint,
+		// and the controller's own suite only builds the binary — so it is covered here.
+		DescribeTable(
+			"resolves the relay's two settings",
+			func(listen, secret, wantListen, wantSecret, wantErr string) {
+				gotListen, gotSecret, err := relay.ResolveSettings(
+					context.Background(),
+					listen,
+					secret,
+				)
+				if wantErr != "" {
+					Expect(err).To(HaveOccurred())
+					Expect(err.Error()).To(Equal(wantErr))
+					return
+				}
+				Expect(err).NotTo(HaveOccurred())
+				Expect(gotListen).To(Equal(wantListen))
+				Expect(gotSecret).To(Equal(wantSecret))
+			},
+			Entry("relay disabled", "", "", "", "", ""),
+			// A secret with no listener is inert, not an error: refusing here would leave a
+			// stage that never runs a relay unable to carry the key at all.
+			Entry("secret without listener is inert", "", "s3cret", "", "", ""),
+			Entry("relay enabled with secret", ":9091", "s3cret", ":9091", "s3cret", ""),
+			Entry(
+				"relay enabled without secret is refused",
+				":9091",
+				"",
+				"",
+				"",
+				"RELAY_LISTEN requires RELAY_SECRET",
+			),
+			// The one this guard exists for: `RELAY_SECRET=" "` is non-empty, so a bare
+			// emptiness check accepts it, and it is a credential anyone can guess.
+			Entry(
+				"all-space secret is refused",
+				":9091",
+				" ",
+				"",
+				"",
+				"RELAY_LISTEN requires RELAY_SECRET",
+			),
+			// A whitespace-only listener trims to empty, which disables the relay — the same
+			// reading the setting's own usage gives "empty".
+			Entry("all-space listener disables the relay", " ", "s3cret", "", "", ""),
+			Entry(
+				"surrounding whitespace is trimmed from both",
+				" :9091 ",
+				" s3cret ",
+				":9091",
+				"s3cret",
+				"",
+			),
+		)
 	})
 })

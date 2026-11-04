@@ -8,7 +8,6 @@ import (
 	"context"
 	"log/slog"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/bborbe/errors"
@@ -64,7 +63,7 @@ type application struct {
 func (a *application) Run(ctx context.Context, sentryClient libsentry.Client) error {
 	libmetrics.NewBuildInfoMetrics().SetBuildInfo(a.BuildGitVersion, a.BuildGitCommit, nil)
 
-	relayListen, relaySecret, err := resolveRelaySettings(ctx, a.RelayListen, a.RelaySecret)
+	relayListen, relaySecret, err := relay.ResolveSettings(ctx, a.RelayListen, a.RelaySecret)
 	if err != nil {
 		return err
 	}
@@ -74,33 +73,6 @@ func (a *application) Run(ctx context.Context, sentryClient libsentry.Client) er
 		services = append(services, a.createRelayServer(relayListen, relaySecret))
 	}
 	return service.Run(ctx, services...)
-}
-
-// resolveRelaySettings validates the relay's two settings together and returns them trimmed.
-//
-// The relay is optional, and its two settings are required together: a listener with no secret
-// would serve a pull endpoint that anyone who can reach it could drain. Refused here, at
-// startup, rather than left to fail on the first pull.
-//
-// ⚠️ THE SECRET IS TRIMMED, NOT MERELY CHECKED FOR EMPTINESS. `RELAY_SECRET=" "` is a secret of
-// one space: non-empty, so an emptiness check accepts it, and trivially guessable. Trimming
-// makes a misconfigured environment stop at startup instead of serving a credential anyone can
-// present. A whitespace-only listen is likewise trimmed to empty, which disables the relay —
-// the same reading the flag's own usage gives "empty".
-func resolveRelaySettings(
-	ctx context.Context,
-	listen string,
-	secret string,
-) (string, string, error) {
-	listen = strings.TrimSpace(listen)
-	secret = strings.TrimSpace(secret)
-	if listen == "" {
-		return "", "", nil
-	}
-	if secret == "" {
-		return "", "", errors.Errorf(ctx, "RELAY_LISTEN requires RELAY_SECRET")
-	}
-	return listen, secret, nil
 }
 
 func (a *application) createHTTPServer() run.Func {

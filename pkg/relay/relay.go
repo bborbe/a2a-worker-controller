@@ -147,9 +147,15 @@ func (s *Store) Push(ctx context.Context, token string, body json.RawMessage) er
 		return errors.New(ctx, "push requires a non-empty notification token")
 	}
 	s.mu.Lock()
-	if s.total >= s.maxTotal {
+	// ⚠️ CAPTURED INTO LOCALS BEFORE THE UNLOCK, because these fields are read again by the
+	// error paths below. Formatting the error from s.total / s.bytes after s.mu.Unlock() is an
+	// unsynchronized read of a field a concurrent Push or Drain may be writing — a data race
+	// that only fires on the full-queue path, which is exactly the path a load test trips and
+	// a unit test does not.
+	total := s.total
+	if total >= s.maxTotal {
 		s.mu.Unlock()
-		return errors.Errorf(ctx, "relay queue is full (%d items)", s.total)
+		return errors.Errorf(ctx, "relay queue is full (%d items)", total)
 	}
 	// The byte bound is the one that actually caps memory; the item bound alone only caps it
 	// once each item is also bounded, and both are checked so neither is the sole ceiling.
@@ -163,9 +169,10 @@ func (s *Store) Push(ctx context.Context, token string, body json.RawMessage) er
 	if !seen {
 		charged += len(token)
 	}
-	if s.bytes+charged > MaxTotalBytes {
+	queuedBytes := s.bytes
+	if queuedBytes+charged > MaxTotalBytes {
 		s.mu.Unlock()
-		return errors.Errorf(ctx, "relay queue is full (%d bytes)", s.bytes)
+		return errors.Errorf(ctx, "relay queue is full (%d bytes)", queuedBytes)
 	}
 	if len(queue) >= MaxPerToken {
 		s.mu.Unlock()
