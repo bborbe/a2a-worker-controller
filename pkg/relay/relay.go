@@ -49,9 +49,17 @@ const (
 	// supplied by the deployment and never appears in this package.
 	TunnelSecretHeader = "X-A2A-Tunnel-Secret"
 
-	// PushPath is what a worker posts to. It mirrors the receiver's own path so the worker's
-	// registration is the only thing that changes, not its behaviour.
-	PushPath = "/relay/push"
+	// PushPath is what a worker posts to. It mirrors the receiver's own path exactly, so the
+	// worker's registration is the only thing that changes for a `k8s` target — not its
+	// behaviour, and not the contract it shares with the `docker` arm.
+	//
+	// ⚠️ IT IS `/a2a/push`, NOT `/relay/push`, AND THE DIFFERENCE IS THE CONTRACT. The task's
+	// SC3 requires the endpoint path to be byte-identical in both arms, and a `k8s` worker
+	// dials this path verbatim. `/relay/push` would have made the relay's presence visible in
+	// the one place the design says it must not be: the worker's own configuration. The relay
+	// stays distinguishable by its HOST (`a2a-push-relay.agent.svc.cluster.local`), which is
+	// where a reader should look for it.
+	PushPath = "/a2a/push"
 
 	// PullPath is what the Mac long-polls.
 	PullPath = "/relay/pull"
