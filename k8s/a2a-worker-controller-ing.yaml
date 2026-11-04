@@ -17,16 +17,21 @@ spec:
           # alone never reaches it — and the `/` rule below goes to the `http` port, where the
           # relay's routes do not exist and the bearer-token gate would refuse the Mac anyway.
           #
-          # This is the same exposure the host already carries: `/a2a` is public and gated by a
-          # bearer token, and `/relay/pull` is gated by the tunnel secret, compared in constant
-          # time. Neither is reachable without a credential.
+          # ⚠️ `/relay/pull` EXACTLY, NOT A `/relay` PREFIX, AND THE DIFFERENCE IS AUTHENTICATION.
+          # A prefix also publishes `/relay/push`, which is deliberately unauthenticated — the
+          # notification token it requires is a routing key, not a credential (pkg/relay/relay.go).
+          # Publishing it would let any internet caller fill the bounded queue until real workers
+          # got 503. Workers push in-cluster through the Service and never touch this host, so the
+          # ingress needs the pull half only, and that half is gated by the tunnel secret.
+          #
+          # `Exact` matches the path alone; the Mac's `?wait=25s` query is not part of the path.
           - backend:
               service:
                 name: a2a-worker-controller
                 port:
                   name: relay
-            path: /relay
-            pathType: Prefix
+            path: /relay/pull
+            pathType: Exact
           - backend:
               service:
                 name: a2a-worker-controller

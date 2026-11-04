@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bborbe/errors"
@@ -63,18 +64,43 @@ type application struct {
 func (a *application) Run(ctx context.Context, sentryClient libsentry.Client) error {
 	libmetrics.NewBuildInfoMetrics().SetBuildInfo(a.BuildGitVersion, a.BuildGitCommit, nil)
 
-	// The relay is optional, and its two settings are required together: a listener with no
-	// secret would serve a pull endpoint that anyone in the cluster could drain. Refused here,
-	// at startup, rather than left to fail on the first pull.
-	if a.RelayListen != "" && a.RelaySecret == "" {
-		return errors.Errorf(ctx, "RELAY_LISTEN requires RELAY_SECRET")
+	relayListen, relaySecret, err := resolveRelaySettings(ctx, a.RelayListen, a.RelaySecret)
+	if err != nil {
+		return err
 	}
 
 	services := []run.Func{a.createHTTPServer()}
-	if a.RelayListen != "" {
-		services = append(services, a.createRelayServer())
+	if relayListen != "" {
+		services = append(services, a.createRelayServer(relayListen, relaySecret))
 	}
 	return service.Run(ctx, services...)
+}
+
+// resolveRelaySettings validates the relay's two settings together and returns them trimmed.
+//
+// The relay is optional, and its two settings are required together: a listener with no secret
+// would serve a pull endpoint that anyone who can reach it could drain. Refused here, at
+// startup, rather than left to fail on the first pull.
+//
+// ⚠️ THE SECRET IS TRIMMED, NOT MERELY CHECKED FOR EMPTINESS. `RELAY_SECRET=" "` is a secret of
+// one space: non-empty, so an emptiness check accepts it, and trivially guessable. Trimming
+// makes a misconfigured environment stop at startup instead of serving a credential anyone can
+// present. A whitespace-only listen is likewise trimmed to empty, which disables the relay —
+// the same reading the flag's own usage gives "empty".
+func resolveRelaySettings(
+	ctx context.Context,
+	listen string,
+	secret string,
+) (string, string, error) {
+	listen = strings.TrimSpace(listen)
+	secret = strings.TrimSpace(secret)
+	if listen == "" {
+		return "", "", nil
+	}
+	if secret == "" {
+		return "", "", errors.Errorf(ctx, "RELAY_LISTEN requires RELAY_SECRET")
+	}
+	return listen, secret, nil
 }
 
 func (a *application) createHTTPServer() run.Func {
@@ -183,15 +209,15 @@ func (a *application) createHTTPServer() run.Func {
 // thing this endpoint cannot have. A separate listener keeps the two surfaces separable and
 // lets the relay be reached on a port the worker's egress policy can name without also
 // exposing the control API on it.
-func (a *application) createRelayServer() run.Func {
+func (a *application) createRelayServer(listen string, secret string) run.Func {
 	return func(ctx context.Context) error {
 		store := relay.NewStore(0)
 		relayRouter := mux.NewRouter()
 		relayRouter.Path("/healthz").Handler(factory.CreateHealthzHandler())
 		relayRouter.Path(relay.PushPath).Handler(relay.PushHandler(store))
-		relayRouter.Path(relay.PullPath).Handler(relay.PullHandler(store, a.RelaySecret))
-		slog.Info("starting a2a push relay", "listen", a.RelayListen)
-		return libhttp.NewServer(a.RelayListen, relayRouter).Run(ctx)
+		relayRouter.Path(relay.PullPath).Handler(relay.PullHandler(store, secret))
+		slog.Info("starting a2a push relay", "listen", listen)
+		return libhttp.NewServer(listen, relayRouter).Run(ctx)
 	}
 }
 

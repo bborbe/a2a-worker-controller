@@ -86,6 +86,10 @@ spec:
           ports:
             - containerPort: 9090
               name: http
+            # The relay's own listener. Declared so the manifest describes what the container
+            # actually serves: the Service's `relay` port resolves by name to this one.
+            - containerPort: 9091
+              name: relay
           readinessProbe:
             httpGet:
               path: /readiness
