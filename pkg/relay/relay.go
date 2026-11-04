@@ -78,6 +78,13 @@ const (
 	// A token minted by the supervisor is a short identifier; 256 bytes is generous.
 	MaxTokenBytes = 256
 
+	// MaxConcurrentPushes bounds the bytes IN FLIGHT, which the queue bound cannot see: a
+	// handler buffers up to MaxBodyBytes before Store.Push applies any limit, so without this
+	// an unauthenticated caller opening many connections holds many buffers at once. At
+	// 32 × 64 KiB that is ~2 MiB — comfortably inside the 50Mi the relay shares with the
+	// control API — and a push beyond it is refused rather than queued.
+	MaxConcurrentPushes = 32
+
 	// MaxTotalBytes bounds the whole queue by memory rather than by count, which is the bound
 	// that actually matters: a count only bounds memory once the per-item size is bounded too,
 	// and the two limits must be checked together or neither is a ceiling.
@@ -217,7 +224,19 @@ func (s *Store) Wait(ctx context.Context, d time.Duration) {
 
 // PushHandler accepts one worker push.
 func PushHandler(store *Store) http.Handler {
+	// ⚠️ A HARD CAP ON HANDLERS IN FLIGHT, because the queue's byte bound runs too late. The
+	// body is buffered before Store.Push sees it, so N concurrent requests hold N buffers
+	// whatever the queue says. Acquired without blocking: a caller past the cap is refused with
+	// 503 (the SDK's sender retries), never left holding a goroutine and a buffer.
+	inFlight := make(chan struct{}, MaxConcurrentPushes)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case inFlight <- struct{}{}:
+			defer func() { <-inFlight }()
+		default:
+			writeError(w, http.StatusServiceUnavailable, "too many pushes in flight")
+			return
+		}
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 			return
