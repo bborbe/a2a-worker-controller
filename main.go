@@ -22,6 +22,7 @@ import (
 
 	"github.com/bborbe/a2a-worker-controller/pkg"
 	"github.com/bborbe/a2a-worker-controller/pkg/factory"
+	"github.com/bborbe/a2a-worker-controller/pkg/relay"
 )
 
 func main() {
@@ -38,6 +39,8 @@ type application struct {
 	A2APublicURL           string        `required:"true"  arg:"a2a-public-url"             env:"A2A_PUBLIC_URL"        usage:"externally reachable A2A endpoint the card advertises"`
 	A2AAgentName           string        `required:"false" arg:"a2a-agent-name"             env:"A2A_AGENT_NAME"        usage:"agent name the Agent Card advertises"                                                                                                                                                           default:"a2a-worker-controller"`
 	A2AAuthToken           string        `required:"true"  arg:"a2a-auth-token"             env:"A2A_AUTH_TOKEN"        usage:"bearer token every gated request must present"                                                                                                                                 display:"length"`
+	RelayListen            string        `required:"false" arg:"relay-listen"               env:"RELAY_LISTEN"          usage:"address the A2A push relay listens on (empty disables the relay)"`
+	RelaySecret            string        `required:"false" arg:"relay-secret"               env:"RELAY_SECRET"          usage:"secret the tunnel's pull side must present"                                                                                                                                    display:"length"`
 	Namespace              string        `required:"false" arg:"namespace"                  env:"NAMESPACE"             usage:"k8s backend: namespace every worker is created in"`
 	WorkerTemplate         string        `required:"false" arg:"worker-template"            env:"WORKER_TEMPLATE"       usage:"k8s backend: Config every worker is cloned from"                                                                                                                                                default:"claude-interactive"`
 	IngressDomain          string        `required:"false" arg:"ingress-domain"             env:"INGRESS_DOMAIN"        usage:"k8s backend: parent domain of every worker host"`
@@ -60,10 +63,16 @@ type application struct {
 func (a *application) Run(ctx context.Context, sentryClient libsentry.Client) error {
 	libmetrics.NewBuildInfoMetrics().SetBuildInfo(a.BuildGitVersion, a.BuildGitCommit, nil)
 
-	return service.Run(
-		ctx,
-		a.createHTTPServer(),
-	)
+	relayListen, relaySecret, err := relay.ResolveSettings(ctx, a.RelayListen, a.RelaySecret)
+	if err != nil {
+		return err
+	}
+
+	services := []run.Func{a.createHTTPServer()}
+	if relayListen != "" {
+		services = append(services, a.createRelayServer(relayListen, relaySecret))
+	}
+	return service.Run(ctx, services...)
 }
 
 func (a *application) createHTTPServer() run.Func {
@@ -155,6 +164,32 @@ func (a *application) createHTTPServer() run.Func {
 			a.Listen,
 			pkg.NewAuthToken(a.A2AAuthToken).Wrap(router),
 		).Run(ctx)
+	}
+}
+
+// createRelayServer serves the cluster-side half of the A2A push tunnel on its own listener.
+//
+// ⚠️ IT IS DELIBERATELY NOT BEHIND THE AUTH-TOKEN GATE. That gate authenticates the
+// controller's own control API with a bearer token a worker must never hold; a relay that
+// demanded it would make every worker's push fail. The relay authenticates its own two
+// endpoints instead — the push side by requiring the notification token (which is the routing
+// key, verified by the supervisor that minted it), the pull side by the tunnel secret, which
+// only the Mac holds.
+//
+// ⚠️ WHY A SECOND LISTENER RATHER THAN A ROUTE ON THE MAIN ONE. The main router is wrapped
+// whole by the gate, so a relay path added to it would be gated by construction — the very
+// thing this endpoint cannot have. A separate listener keeps the two surfaces separable and
+// lets the relay be reached on a port the worker's egress policy can name without also
+// exposing the control API on it.
+func (a *application) createRelayServer(listen string, secret string) run.Func {
+	return func(ctx context.Context) error {
+		store := relay.NewStore(0)
+		relayRouter := mux.NewRouter()
+		relayRouter.Path("/healthz").Handler(factory.CreateHealthzHandler())
+		relayRouter.Path(relay.PushPath).Handler(relay.PushHandler(store))
+		relayRouter.Path(relay.PullPath).Handler(relay.PullHandler(store, secret))
+		slog.Info("starting a2a push relay", "listen", listen)
+		return libhttp.NewServer(listen, relayRouter).Run(ctx)
 	}
 }
 

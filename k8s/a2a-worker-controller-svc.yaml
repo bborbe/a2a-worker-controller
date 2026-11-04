@@ -7,5 +7,9 @@ spec:
   ports:
   - name: http
     port: 9090
+  # The A2A push relay. A worker dials this to report status; the Mac long-polls the same
+  # listener's /relay/pull from outside the cluster.
+  - name: relay
+    port: 9091
   selector:
     app: a2a-worker-controller

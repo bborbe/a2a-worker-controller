@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: serve the cluster-side half of the A2A push tunnel on its own listener (`RELAY_LISTEN`, with `RELAY_SECRET`), so a worker in this cluster can report status to the supervisor that spawned it. The worker pushes to `/a2a/push` — the same path the `docker` arm uses, so a `k8s` worker's contract does not change, only the host it dials; the Mac long-polls `/relay/pull` and the relay holds what arrives in between. The relay does not verify the notification token — the supervisor that minted it does — and authenticates its pull side with the tunnel secret instead, in constant time. A full queue answers `503` so the SDK's sender retries rather than a status vanishing
+
 ## v0.19.0
 
 - fix: bound the A2A task store with a TTL and a hard entry cap, so a control call no longer pins its task — including the worker's bearer token — in an in-memory map for the life of the process. The store reports its entry count as `a2a_task_store_entries` on `/metrics`, and the TTL and cap are configurable as `A2A_TASK_STORE_TTL` (default `5m`) and `A2A_TASK_STORE_MAX` (default `500`)
