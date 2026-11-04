@@ -62,6 +62,16 @@ spec:
                 secretKeyRef:
                   key: a2a-auth-token
                   name: a2a-worker-controller
+            # The A2A push relay: the cluster-side half of the tunnel that carries a k8s
+            # worker's status to the session that spawned it. Its own listener, NOT behind the
+            # bearer-token gate, because a worker must never hold that token.
+            - name: RELAY_LISTEN
+              value: ':9091'
+            - name: RELAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: relay-secret
+                  name: a2a-worker-controller
           image: '{{"DOCKER_REGISTRY" | env}}/a2a-worker-controller:{{"BRANCH" | env}}'
           imagePullPolicy: Always
           livenessProbe:
