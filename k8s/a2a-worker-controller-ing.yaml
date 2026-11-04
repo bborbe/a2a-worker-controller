@@ -12,6 +12,21 @@ spec:
     - host: 'a2a-worker-controller.{{ "NAMESPACE" | env }}.quant.benjamin-borbe.de'
       http:
         paths:
+          # ⚠️ THE RELAY'S PULL HALF NEEDS THIS PATH, AND WITHOUT IT THE TUNNEL IS A NO-OP.
+          # The Mac long-polls `/relay/pull` from outside the cluster, so a ClusterIP Service
+          # alone never reaches it — and the `/` rule below goes to the `http` port, where the
+          # relay's routes do not exist and the bearer-token gate would refuse the Mac anyway.
+          #
+          # This is the same exposure the host already carries: `/a2a` is public and gated by a
+          # bearer token, and `/relay/pull` is gated by the tunnel secret, compared in constant
+          # time. Neither is reachable without a credential.
+          - backend:
+              service:
+                name: a2a-worker-controller
+                port:
+                  name: relay
+            path: /relay
+            pathType: Prefix
           - backend:
               service:
                 name: a2a-worker-controller
