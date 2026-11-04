@@ -14,7 +14,6 @@ require (
 	github.com/bborbe/service v1.11.2
 	github.com/bborbe/time v1.27.25
 	github.com/bborbe/vault-cli v0.186.2
-	github.com/golang/glog v1.2.5
 	github.com/gorilla/mux v1.8.1
 	github.com/onsi/ginkgo/v2 v2.34.0
 	github.com/onsi/gomega v1.44.0
@@ -47,6 +46,7 @@ require (
 	github.com/go-openapi/swag/pools v0.29.2 // indirect
 	github.com/go-openapi/swag/typeutils v0.29.2 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
+	github.com/golang/glog v1.2.5 // indirect
 	github.com/google/gnostic-models v0.7.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/pprof v0.0.0-20261102214848-0031fcd306b0 // indirect

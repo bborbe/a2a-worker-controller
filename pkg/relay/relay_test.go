@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -199,6 +200,119 @@ var _ = Describe("relay", func() {
 
 			Expect(time.Since(start)).To(BeNumerically("<", 2*time.Second))
 			Expect(rec.Code).To(Equal(http.StatusOK))
+		})
+
+		It(
+			"refuses every pull when no secret is configured, rather than accepting an empty one",
+			func() {
+				store := relay.NewStore(10)
+				rec := httptest.NewRecorder()
+
+				// An empty configured secret must never match a presented one, or a deployment that
+				// forgot to set it would serve an unauthenticated queue.
+				relay.PullHandler(store, "").ServeHTTP(rec, pull("", time.Millisecond))
+
+				Expect(rec.Code).To(Equal(http.StatusUnauthorized))
+			},
+		)
+
+		It("treats an unparseable wait as the default rather than refusing the poll", func() {
+			store := relay.NewStore(10)
+			// A cancelled context releases the wait immediately, so the default window the bad
+			// value falls back to is exercised without the spec sleeping through it.
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			req := httptest.NewRequest(http.MethodGet, relay.PullPath+"?wait=not-a-duration", nil).
+				WithContext(ctx)
+			req.Header.Set(relay.TunnelSecretHeader, secret)
+			rec := httptest.NewRecorder()
+
+			relay.PullHandler(store, secret).ServeHTTP(rec, req)
+
+			Expect(rec.Code).To(Equal(http.StatusOK))
+			Expect(strings.TrimSpace(rec.Body.String())).To(Equal(`{"items":[]}`))
+		})
+	})
+
+	Describe("method and size guards", func() {
+		It("refuses a GET on the push path", func() {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, relay.PushPath, nil)
+			req.Header.Set(relay.TokenHeader, "tok-a")
+
+			relay.PushHandler(relay.NewStore(10)).ServeHTTP(rec, req)
+
+			Expect(rec.Code).To(Equal(http.StatusMethodNotAllowed))
+		})
+
+		It("refuses a POST on the pull path", func() {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, relay.PullPath, nil)
+			req.Header.Set(relay.TunnelSecretHeader, secret)
+
+			relay.PullHandler(relay.NewStore(10), secret).ServeHTTP(rec, req)
+
+			Expect(rec.Code).To(Equal(http.StatusMethodNotAllowed))
+		})
+
+		It("refuses an oversize body rather than buffering it", func() {
+			store := relay.NewStore(10)
+			oversize := `"` + strings.Repeat("x", relay.MaxBodyBytes) + `"`
+			rec := httptest.NewRecorder()
+
+			relay.PushHandler(store).ServeHTTP(rec, push("tok-a", oversize))
+
+			Expect(rec.Code).To(Equal(http.StatusRequestEntityTooLarge))
+			Expect(store.Drain()).To(BeEmpty())
+		})
+	})
+
+	Describe("concurrency", func() {
+		It("loses nothing when pushes and pulls interleave", func() {
+			store := relay.NewStore(1000)
+			const perWorker = 25
+			workers := []string{"tok-a", "tok-b", "tok-c"}
+
+			var wg sync.WaitGroup
+			for _, token := range workers {
+				wg.Add(1)
+				go func(t string) {
+					defer wg.Done()
+					for i := 0; i < perWorker; i++ {
+						rec := httptest.NewRecorder()
+						relay.PushHandler(store).ServeHTTP(rec, push(t, `{}`))
+						Expect(rec.Code).To(Equal(http.StatusOK))
+					}
+				}(token)
+			}
+			// A puller racing the pushes must not lose or duplicate anything: Drain is atomic.
+			// The count comes back over a channel so the reader never touches it while the
+			// puller is still writing.
+			stop := make(chan struct{})
+			pulled := make(chan int, 1)
+			go func() {
+				total := 0
+				for {
+					select {
+					case <-stop:
+						pulled <- total + len(store.Drain())
+						return
+					default:
+					}
+					rec := httptest.NewRecorder()
+					relay.PullHandler(store, secret).ServeHTTP(rec, pull(secret, time.Millisecond))
+					var body struct {
+						Items []relay.Item `json:"items"`
+					}
+					Expect(json.NewDecoder(rec.Body).Decode(&body)).To(Succeed())
+					total += len(body.Items)
+				}
+			}()
+
+			wg.Wait()
+			close(stop)
+
+			Expect(<-pulled).To(Equal(len(workers) * perWorker))
 		})
 	})
 })

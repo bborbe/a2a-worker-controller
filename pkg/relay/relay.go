@@ -28,12 +28,12 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/bborbe/errors"
-	"github.com/golang/glog"
 )
 
 const (
@@ -112,20 +112,24 @@ func NewStore(maxTotal int) *Store {
 //
 // A full store refuses rather than dropping the oldest: a dropped status is invisible, while a
 // refused push reaches the worker's own log, where the failure can be seen.
-func (s *Store) Push(token string, body json.RawMessage) error {
+//
+// ⚠️ THE CALLER'S CONTEXT IS THREADED INTO EVERY ERROR, never `context.Background()`. The
+// handler already holds the request's, and an error that drops it cannot be traced back to the
+// request that produced it.
+func (s *Store) Push(ctx context.Context, token string, body json.RawMessage) error {
 	if token == "" {
-		return errors.New(context.Background(), "push requires a non-empty notification token")
+		return errors.New(ctx, "push requires a non-empty notification token")
 	}
 	s.mu.Lock()
 	if s.total >= s.maxTotal {
 		s.mu.Unlock()
-		return errors.Errorf(context.Background(), "relay queue is full (%d items)", s.total)
+		return errors.Errorf(ctx, "relay queue is full (%d items)", s.total)
 	}
 	queue := s.byToken[token]
 	if len(queue) >= MaxPerToken {
 		s.mu.Unlock()
 		return errors.Errorf(
-			context.Background(),
+			ctx,
 			"relay queue for one worker is full (%d items)",
 			len(queue),
 		)
@@ -204,7 +208,7 @@ func PushHandler(store *Store) http.Handler {
 			writeError(w, http.StatusBadRequest, "the push body must be JSON")
 			return
 		}
-		if err := store.Push(token, json.RawMessage(body)); err != nil {
+		if err := store.Push(r.Context(), token, json.RawMessage(body)); err != nil {
 			// 503, not 4xx: the worker did nothing wrong, and the SDK's sender retries on a
 			// non-success status, which is what we want when the Mac is behind.
 			writeError(w, http.StatusServiceUnavailable, err.Error())
@@ -237,7 +241,9 @@ func PullHandler(store *Store, secret string) http.Handler {
 		if items == nil {
 			items = []Item{}
 		}
-		glog.V(2).Infof("relay pull returned %d item(s)", len(items))
+		// log/slog, not glog: the rest of this module logs through slog, and glog would
+		// register its own flags and file sink alongside it.
+		slog.Debug("relay pull returned items", "count", len(items))
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	})
 }
