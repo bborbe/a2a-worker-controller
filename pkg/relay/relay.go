@@ -72,6 +72,12 @@ const (
 	// worker management down with it.
 	MaxBodyBytes = 64 << 10
 
+	// MaxTokenBytes caps the notification token, which is otherwise as large as the client
+	// cares to make it: Go's default MaxHeaderBytes is 1 MiB, so 500 distinct oversized tokens
+	// would retain ~500 MiB as map keys while every body stayed inside the byte bound below.
+	// A token minted by the supervisor is a short identifier; 256 bytes is generous.
+	MaxTokenBytes = 256
+
 	// MaxTotalBytes bounds the whole queue by memory rather than by count, which is the bound
 	// that actually matters: a count only bounds memory once the per-item size is bounded too,
 	// and the two limits must be checked together or neither is a ceiling.
@@ -140,11 +146,20 @@ func (s *Store) Push(ctx context.Context, token string, body json.RawMessage) er
 	}
 	// The byte bound is the one that actually caps memory; the item bound alone only caps it
 	// once each item is also bounded, and both are checked so neither is the sole ceiling.
-	if s.bytes+len(body) > MaxTotalBytes {
+	//
+	// ⚠️ THE TOKEN IS CHARGED TOO, AND IT HAS TO BE. It is stored as a map key, so it is
+	// retained memory exactly as a body is — and while every body was inside the bound, the
+	// token was the one field nothing counted. Charged once, when the token first enters the
+	// map, so a worker's repeated pushes do not pay for its name over and over.
+	queue, seen := s.byToken[token]
+	charged := len(body)
+	if !seen {
+		charged += len(token)
+	}
+	if s.bytes+charged > MaxTotalBytes {
 		s.mu.Unlock()
 		return errors.Errorf(ctx, "relay queue is full (%d bytes)", s.bytes)
 	}
-	queue := s.byToken[token]
 	if len(queue) >= MaxPerToken {
 		s.mu.Unlock()
 		return errors.Errorf(
@@ -155,7 +170,7 @@ func (s *Store) Push(ctx context.Context, token string, body json.RawMessage) er
 	}
 	s.byToken[token] = append(queue, body)
 	s.total++
-	s.bytes += len(body)
+	s.bytes += charged
 	s.mu.Unlock()
 	s.signal()
 	return nil
@@ -210,6 +225,12 @@ func PushHandler(store *Store) http.Handler {
 		token := r.Header.Get(TokenHeader)
 		if token == "" {
 			writeError(w, http.StatusBadRequest, "a push requires the "+TokenHeader+" header")
+			return
+		}
+		// Refused before the body is even read: an oversized token is not a routing key, and
+		// letting it into the map is the memory hole the byte bound cannot see.
+		if len(token) > MaxTokenBytes {
+			writeError(w, http.StatusBadRequest, "the notification token is too long")
 			return
 		}
 		body, err := io.ReadAll(io.LimitReader(r.Body, MaxBodyBytes+1))

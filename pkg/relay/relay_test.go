@@ -69,6 +69,20 @@ var _ = Describe("relay", func() {
 			Expect(store.Drain()).To(BeEmpty())
 		})
 
+		It(
+			"refuses an oversized token, which would otherwise be retained as an uncounted map key",
+			func() {
+				store := relay.NewStore(1000)
+				rec := httptest.NewRecorder()
+
+				relay.PushHandler(store).
+					ServeHTTP(rec, push(strings.Repeat("t", relay.MaxTokenBytes+1), `{}`))
+
+				Expect(rec.Code).To(Equal(http.StatusBadRequest))
+				Expect(store.Drain()).To(BeEmpty())
+			},
+		)
+
 		It("refuses a body that is not JSON rather than buffering it", func() {
 			store := relay.NewStore(10)
 			rec := httptest.NewRecorder()
