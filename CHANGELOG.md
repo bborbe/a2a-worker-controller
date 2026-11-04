@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.20.0
 
 - feat: serve the cluster-side half of the A2A push tunnel on its own listener (`RELAY_LISTEN`, with `RELAY_SECRET`), so a worker in this cluster can report status to the supervisor that spawned it. The worker pushes to `/a2a/push` — the same path the `docker` arm uses, so a `k8s` worker's contract does not change, only the host it dials; the Mac long-polls `/relay/pull` and the relay holds what arrives in between. The relay does not verify the notification token — the supervisor that minted it does — and authenticates its pull side with the tunnel secret instead, in constant time. A full queue answers `503` so the SDK's sender retries rather than a status vanishing
 
