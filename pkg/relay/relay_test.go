@@ -7,6 +7,7 @@ package relay_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -253,6 +254,24 @@ var _ = Describe("relay", func() {
 			relay.PullHandler(relay.NewStore(10), secret).ServeHTTP(rec, req)
 
 			Expect(rec.Code).To(Equal(http.StatusMethodNotAllowed))
+		})
+
+		It("refuses on the byte bound, not only on the item count", func() {
+			// The container the relay shares is memory-limited, so the queue must stop on
+			// bytes even when the item count still has room. Distinct tokens keep the per-token
+			// bound out of the way so this exercises the total-byte bound alone.
+			store := relay.NewStore(100_000)
+			body := `"` + strings.Repeat("x", relay.MaxBodyBytes-2) + `"`
+			var refused bool
+			for i := 0; i < 200 && !refused; i++ {
+				rec := httptest.NewRecorder()
+				relay.PushHandler(store).ServeHTTP(rec, push(fmt.Sprintf("tok-%d", i), body))
+				if rec.Code == http.StatusServiceUnavailable {
+					refused = true
+				}
+			}
+
+			Expect(refused).To(BeTrue(), "the queue must refuse before it can exhaust the pod")
 		})
 
 		It("refuses an oversize body rather than buffering it", func() {

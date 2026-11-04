@@ -63,7 +63,19 @@ const (
 
 	// MaxBodyBytes caps a single push. The SDK's status events are small; a body larger than
 	// this is not a status and is refused rather than buffered.
-	MaxBodyBytes = 1 << 20
+	//
+	// ⚠️ 64 KiB, NOT 1 MiB, AND THE REASON IS THE POD'S MEMORY LIMIT. The relay shares its
+	// container with the controller's control API, which is limited to 50Mi. A per-item cap
+	// multiplied by the item bound is the real ceiling, and at 1 MiB × 500 items it was ~500
+	// MiB — so roughly fifty one-megabyte pushes from any worker (the exact party that can
+	// reach this deliberately unauthenticated endpoint) would OOMKill the controller and take
+	// worker management down with it.
+	MaxBodyBytes = 64 << 10
+
+	// MaxTotalBytes bounds the whole queue by memory rather than by count, which is the bound
+	// that actually matters: a count only bounds memory once the per-item size is bounded too,
+	// and the two limits must be checked together or neither is a ceiling.
+	MaxTotalBytes = 4 << 20
 
 	// DefaultWait is the long-poll window. Short enough that a lost connection is noticed
 	// quickly, long enough that an idle tunnel costs a handful of requests a minute.
@@ -89,6 +101,7 @@ type Store struct {
 	byToken  map[string][]json.RawMessage
 	total    int
 	maxTotal int
+	bytes    int
 	notify   chan struct{}
 }
 
@@ -125,6 +138,12 @@ func (s *Store) Push(ctx context.Context, token string, body json.RawMessage) er
 		s.mu.Unlock()
 		return errors.Errorf(ctx, "relay queue is full (%d items)", s.total)
 	}
+	// The byte bound is the one that actually caps memory; the item bound alone only caps it
+	// once each item is also bounded, and both are checked so neither is the sole ceiling.
+	if s.bytes+len(body) > MaxTotalBytes {
+		s.mu.Unlock()
+		return errors.Errorf(ctx, "relay queue is full (%d bytes)", s.bytes)
+	}
 	queue := s.byToken[token]
 	if len(queue) >= MaxPerToken {
 		s.mu.Unlock()
@@ -136,6 +155,7 @@ func (s *Store) Push(ctx context.Context, token string, body json.RawMessage) er
 	}
 	s.byToken[token] = append(queue, body)
 	s.total++
+	s.bytes += len(body)
 	s.mu.Unlock()
 	s.signal()
 	return nil
@@ -156,6 +176,7 @@ func (s *Store) Drain() []Item {
 	}
 	s.byToken = make(map[string][]json.RawMessage)
 	s.total = 0
+	s.bytes = 0
 	return items
 }
 
