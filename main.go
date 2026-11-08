@@ -64,6 +64,7 @@ type application struct {
 	A2AMCPKeychainAccount  string        `required:"false" arg:"a2a-mcp-keychain-account"   env:"A2A_LOCAL_KEYCHAIN_ACCOUNT" usage:"/mcp: Keychain account holding a local target's token"                                                                                                                                          default:"a2a-token"`
 	A2AMCPTeamVaultKey     string        `required:"false" arg:"a2a-mcp-teamvault-key"      env:"A2A_MCP_TEAMVAULT_KEY"      usage:"/mcp: TeamVault key of the target's token (last fallback)"`
 	A2AMCPTeamVaultConfig  string        `required:"false" arg:"a2a-mcp-teamvault-config"   env:"TEAMVAULT_CONFIG_PERSONAL"  usage:"/mcp: TeamVault config for the token lookup (defaults to ~/.config/teamvault-cli/config.json)"`
+	A2AMCPBearerFile       string        `required:"false" arg:"a2a-mcp-bearer-file"        env:"A2A_MCP_BEARER_FILE"        usage:"/mcp: file holding the local bearer every caller must present (created 0600 on first start; defaults to ~/.local/state/a2a-worker-controller/mcp-bearer)"`
 	BuildGitVersion        string        `required:"false" arg:"build-git-version"          env:"BUILD_GIT_VERSION"          usage:"Build Git version"                                                                                                                                                                              default:"dev"`
 	BuildGitCommit         string        `required:"false" arg:"build-git-commit"           env:"BUILD_GIT_COMMIT"           usage:"Build Git commit hash"                                                                                                                                                                          default:"none"`
 }
@@ -163,9 +164,13 @@ func (a *application) createHTTPServer() run.Func {
 			})))
 		router.Path(pkg.A2APath).Handler(pkg.NewA2AHandler(executor, taskStore))
 		if a.A2AMCPTargetURL != "" {
-			// Exempt from the bearer gate below and gated by the handler itself — loopback
-			// callers naming their session only. See pkg/a2amcp.
-			router.Path(a2amcp.Path).Handler(a.createA2AMCPHandler())
+			// Exempt from the bearer gate below and gated by the handler itself — the local
+			// bearer plus a named session. See pkg/a2amcp.
+			mcpHandler, err := a.createA2AMCPHandler(ctx)
+			if err != nil {
+				return err
+			}
+			router.Path(a2amcp.Path).Handler(mcpHandler)
 		}
 
 		// The gate wraps the whole router, so /a2a and every route registered after this
@@ -183,12 +188,28 @@ func (a *application) createHTTPServer() run.Func {
 // createA2AMCPHandler wires the /mcp a2a tools: an A2A client for the configured target,
 // whose token follows the stdio shim's precedence — explicit value, else (local target only)
 // the Keychain item, else the TeamVault key.
-func (a *application) createA2AMCPHandler() http.Handler {
+//
+// The local bearer is loaded (or created on first start) here, so an unusable state directory
+// or a bearer file another user can read stops the controller at startup rather than leaving
+// a route that refuses every call.
+func (a *application) createA2AMCPHandler(ctx context.Context) (http.Handler, error) {
 	teamVaultConfig := a.A2AMCPTeamVaultConfig
 	if teamVaultConfig == "" {
 		teamVaultConfig = pkg.DefaultTeamVaultConfigPath()
 	}
-	tokens := a2amcp.NewTokenSource(
+	bearerFile := a.A2AMCPBearerFile
+	if bearerFile == "" {
+		var err error
+		if bearerFile, err = a2amcp.DefaultBearerFile(ctx); err != nil {
+			return nil, err
+		}
+	}
+	bearer, err := a2amcp.LoadOrCreateBearer(ctx, bearerFile)
+	if err != nil {
+		return nil, err
+	}
+	slog.Info("a2a mcp route enabled", "target", a.A2AMCPTargetURL, "bearer_file", bearerFile)
+	return factory.CreateA2AMCPHandler(
 		a2amcp.TokenConfig{
 			Token:           a.A2AMCPToken,
 			TargetURL:       a.A2AMCPTargetURL,
@@ -196,14 +217,9 @@ func (a *application) createA2AMCPHandler() http.Handler {
 			KeychainAccount: a.A2AMCPKeychainAccount,
 			TeamVaultKey:    a.A2AMCPTeamVaultKey,
 		},
-		a2amcp.NewKeychainReader(),
-		pkg.NewTeamVaultResolverWithConfig(teamVaultConfig),
-	)
-	return a2amcp.NewHandler(a2amcp.NewClient(
-		&http.Client{Timeout: a2amcp.DefaultTimeout},
-		a.A2AMCPTargetURL,
-		tokens,
-	))
+		teamVaultConfig,
+		bearer,
+	), nil
 }
 
 // createRelayServer serves the cluster-side half of the A2A push tunnel on its own listener.

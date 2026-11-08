@@ -2,16 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package a2amcp serves the `a2a` MCP tools over HTTP, replacing the per-session stdio shim
-// (a2a-mcp.py) every Claude Code session used to start for itself.
-//
-// The tools are an A2A *client*: they reach an operator-configured target agent, not this
-// controller's own /a2a surface. The controller only hosts them because it is a long-running
-// KeepAlive process on the operator's machine.
 package a2amcp
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
@@ -37,6 +32,8 @@ const SessionHeader = "X-Claude-Code-Session-Id"
 
 // The refusal reasons a log line and a 4xx body carry.
 const (
+	ReasonMissingBearer        = "missing_bearer"
+	ReasonInvalidBearer        = "invalid_bearer"
 	ReasonMissingSessionHeader = "missing_session_header"
 	ReasonEmptySessionHeader   = "empty_session_header"
 	ReasonNonLoopback          = "non_loopback"
@@ -55,18 +52,24 @@ const (
 	ToolSend      = "a2a_send"
 )
 
-// NewHandler returns the MCP endpoint backed by client.
+// NewHandler returns the MCP endpoint backed by client, requiring bearer.
 //
 // ⚠️ This route is exempt from the controller's bearer gate and gated here instead: it must be
 // reachable by every local session without each holding the controller's token, yet it sends
-// A2A with the operator's token. So it refuses any caller not on loopback, and any call that
-// does not name its session — a call is attributed, never defaulted.
-func NewHandler(client Client) http.Handler {
-	return &handler{client: client}
+// A2A with the operator's token. It requires the local bearer (see LoadOrCreateBearer) and a
+// non-empty session id — a call is authenticated AND attributed, never defaulted.
+//
+// The loopback, Host and Origin checks stay as cheap outer layers (they turn away a LAN
+// caller and a rebinding browser page), but they are NOT the authentication: measured
+// 2026-11-08 on OrbStack, a docker worker reaches the host from a loopback peer and local
+// address and sends whatever Host it likes. Only the bearer separates it from a session.
+func NewHandler(client Client, bearer string) http.Handler {
+	return &handler{client: client, bearer: bearer}
 }
 
 type handler struct {
 	client Client
+	bearer string
 }
 
 func (h *handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
@@ -80,6 +83,12 @@ func (h *handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	if !originAllowed(req) {
 		refuse(ctx, resp, http.StatusForbidden, ReasonOriginNotAllowed, remote,
 			"a browser origin that is not loopback may not call the a2a MCP endpoint")
+		return
+	}
+	if reason := h.bearerRefusal(req); reason != "" {
+		resp.Header().Set("WWW-Authenticate", "Bearer")
+		refuse(ctx, resp, http.StatusUnauthorized, reason, remote,
+			"the a2a MCP endpoint requires the local bearer (Authorization: Bearer …)")
 		return
 	}
 	values := req.Header.Values(SessionHeader)
@@ -145,8 +154,10 @@ func (h *handler) handlePost(resp http.ResponseWriter, req *http.Request, sessio
 		return
 	}
 	tool := toolName(request)
+	// Session id, method and tool are caller-supplied, so they are quoted: an unquoted value
+	// carrying ` session=…` would forge a second attribution on the same line.
 	slog.InfoContext(ctx, fmt.Sprintf(
-		"mcp call session=%s method=%s tool=%s remote=%s",
+		"mcp call session=%q method=%q tool=%q remote=%s",
 		sessionID, request.Method, tool, req.RemoteAddr,
 	))
 	result, rpcErr := h.dispatch(ctx, &request)
@@ -211,7 +222,24 @@ func (h *handler) callTool(ctx context.Context, params json.RawMessage) (any, *r
 	return toolResult(string(encoded), false), nil
 }
 
-// refuse answers a gated request and logs the refusal in its pinned format.
+// bearerRefusal returns the refusal reason for req's credential, or "" when it carries this
+// handler's bearer. The comparison is constant-time, like the controller's own gate. An empty
+// configured bearer refuses everything: a handler built without one must not open the route.
+func (h *handler) bearerRefusal(req *http.Request) string {
+	header := req.Header.Get("Authorization")
+	presented, ok := strings.CutPrefix(header, "Bearer ")
+	if !ok || presented == "" {
+		return ReasonMissingBearer
+	}
+	if h.bearer == "" || subtle.ConstantTimeCompare([]byte(presented), []byte(h.bearer)) != 1 {
+		return ReasonInvalidBearer
+	}
+	return ""
+}
+
+// refuse answers a gated request in the controller's structured error shape (the same
+// {"error":{"code","message","details"}} the bearer gate writes) and logs the refusal in its
+// pinned format.
 func refuse(
 	ctx context.Context,
 	resp http.ResponseWriter,
@@ -223,7 +251,13 @@ func refuse(
 	slog.WarnContext(ctx, fmt.Sprintf("mcp refused reason=%s remote=%s", reason, remote))
 	resp.Header().Set("Content-Type", "application/json")
 	resp.WriteHeader(status)
-	_ = json.NewEncoder(resp).Encode(map[string]string{"error": reason, "message": message})
+	_ = json.NewEncoder(resp).Encode(map[string]any{
+		"error": map[string]any{
+			"code":    reason,
+			"message": message,
+			"details": map[string]string{},
+		},
+	})
 }
 
 // loopbackCaller reports whether the request both came from and arrived on loopback.

@@ -5,8 +5,10 @@
 package a2amcp_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,6 +19,9 @@ import (
 	"github.com/bborbe/a2a-worker-controller/mocks"
 	"github.com/bborbe/a2a-worker-controller/pkg/a2amcp"
 )
+
+// testBearer is the local bearer every spec's request presents unless it says otherwise.
+const testBearer = "test-bearer-0123456789abcdef"
 
 var _ = Describe("Handler", func() {
 	var (
@@ -33,6 +38,7 @@ var _ = Describe("Handler", func() {
 		)
 		req.RemoteAddr = "127.0.0.1:51234"
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+testBearer)
 		req.Header.Set(a2amcp.SessionHeader, "session-1")
 		return req
 	}
@@ -49,16 +55,84 @@ var _ = Describe("Handler", func() {
 
 	BeforeEach(func() {
 		client = &mocks.A2amcpClient{}
-		handler = a2amcp.NewHandler(client)
+		handler = a2amcp.NewHandler(client, testBearer)
 		resp = httptest.NewRecorder()
 	})
 
 	Context("gates", func() {
 		const listTools = `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
 
-		It("answers 200 for a loopback caller naming its session (control)", func() {
-			handler.ServeHTTP(resp, newRequest(listTools))
-			Expect(resp.Code).To(Equal(http.StatusOK))
+		It(
+			"answers 200 for a loopback caller with the bearer naming its session (control)",
+			func() {
+				handler.ServeHTTP(resp, newRequest(listTools))
+				Expect(resp.Code).To(Equal(http.StatusOK))
+			},
+		)
+
+		It("refuses a missing bearer with 401 even from loopback", func() {
+			req := newRequest(listTools)
+			req.Header.Del("Authorization")
+			handler.ServeHTTP(resp, req)
+			Expect(resp.Code).To(Equal(http.StatusUnauthorized))
+			Expect(resp.Header().Get("WWW-Authenticate")).To(Equal("Bearer"))
+			Expect(resp.Body.String()).To(ContainSubstring(a2amcp.ReasonMissingBearer))
+		})
+
+		It("refuses a wrong bearer with 401 without echoing it", func() {
+			req := newRequest(listTools)
+			req.Header.Set("Authorization", "Bearer forged-by-a-worker")
+			handler.ServeHTTP(resp, req)
+			Expect(resp.Code).To(Equal(http.StatusUnauthorized))
+			Expect(resp.Body.String()).To(ContainSubstring(a2amcp.ReasonInvalidBearer))
+			Expect(resp.Body.String()).NotTo(ContainSubstring("forged-by-a-worker"))
+		})
+
+		It("refuses every call when built without a bearer", func() {
+			handler = a2amcp.NewHandler(client, "")
+			req := newRequest(listTools)
+			req.Header.Set("Authorization", "Bearer ")
+			handler.ServeHTTP(resp, req)
+			Expect(resp.Code).To(Equal(http.StatusUnauthorized))
+		})
+
+		It("answers refusals in the controller's structured error shape", func() {
+			req := newRequest(listTools)
+			req.Header.Del(a2amcp.SessionHeader)
+			handler.ServeHTTP(resp, req)
+			var body struct {
+				Error struct {
+					Code    string `json:"code"`
+					Message string `json:"message"`
+				} `json:"error"`
+			}
+			Expect(json.Unmarshal(resp.Body.Bytes(), &body)).To(Succeed())
+			Expect(body.Error.Code).To(Equal(a2amcp.ReasonMissingSessionHeader))
+			Expect(body.Error.Message).To(ContainSubstring(a2amcp.SessionHeader))
+		})
+
+		It("refuses a connection that arrived on a non-loopback local address with 403", func() {
+			req := newRequest(listTools)
+			localAddr := &net.TCPAddr{IP: net.ParseIP("192.168.178.20"), Port: 8090}
+			req = req.WithContext(
+				context.WithValue(req.Context(), http.LocalAddrContextKey, localAddr),
+			)
+			handler.ServeHTTP(resp, req)
+			Expect(resp.Code).To(Equal(http.StatusForbidden))
+			Expect(resp.Body.String()).To(ContainSubstring(a2amcp.ReasonNonLoopback))
+		})
+
+		It("refuses an oversized body with 413", func() {
+			handler.ServeHTTP(resp, newRequest(`{"pad":"`+strings.Repeat("x", 1<<20)+`"}`))
+			Expect(resp.Code).To(Equal(http.StatusRequestEntityTooLarge))
+		})
+
+		It("refuses a GET with 405 naming the allowed methods", func() {
+			req := newRequest("")
+			req.Method = http.MethodGet
+			handler.ServeHTTP(resp, req)
+			Expect(resp.Code).To(Equal(http.StatusMethodNotAllowed))
+			Expect(resp.Header().Get("Allow")).To(Equal("POST, DELETE"))
 		})
 
 		It("refuses an absent session header with 400", func() {
