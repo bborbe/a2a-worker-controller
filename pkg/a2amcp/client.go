@@ -24,6 +24,19 @@ const AgentCardPath = "/.well-known/agent-card.json"
 // budget: an A2A turn is a full model turn and routinely takes minutes.
 const DefaultTimeout = 300 * time.Second
 
+// A2AVersionHeader declares the A2A protocol version this client speaks, and
+// A2AProtocolVersion is its value.
+//
+// ⚠️ REQUIRED, NOT OPTIONAL. a2a-go v2 serves 1.0 only, and a request that omits the header is
+// read as 0.3 and refused with `VERSION_NOT_SUPPORTED` ("requested \"0.3\", served \"1.0\"").
+// Measured 2026-11-08 against bborbe/agent-claude:local-scratch: the identical request fails
+// without the header and returns the agent's reply with it. The stdio shim sends no version
+// header, so it is broken against every 1.0 worker — this client must not inherit that.
+const (
+	A2AVersionHeader   = "A2A-Version"
+	A2AProtocolVersion = "1.0"
+)
+
 // maxResponseBytes caps what is read from the target, so a misbehaving agent cannot exhaust
 // the controller's memory through a tool call.
 const maxResponseBytes = 8 << 20
@@ -111,6 +124,7 @@ func (c *client) Send(ctx context.Context, text string, contextID string) (map[s
 		return nil, errors.Wrapf(ctx, err, "build SendMessage request failed")
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(A2AVersionHeader, A2AProtocolVersion)
 	req.Header.Set("Authorization", "Bearer "+token)
 	//nolint:gosec // G704: target is operator configuration, not caller input
 	resp, err := c.httpClient.Do(req)
