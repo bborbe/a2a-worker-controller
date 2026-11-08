@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: serve the `a2a` MCP tools (`a2a_agent_card`, `a2a_send`) over HTTP at `/mcp`, replacing the stdio shim every Claude Code session started for itself — two processes per session. The tools are an A2A *client* for an operator-configured target (`A2A_MCP_TARGET_URL`, default `http://localhost:9091`; empty disables the route), returning the shim's result shapes field for field. The route is exempt from the bearer gate and gates itself instead: it refuses a non-loopback peer or local address, a non-loopback `Host` or `Origin` (`403`), and a call whose `X-Claude-Code-Session-Id` is absent or empty (`400`) — a call is attributed, never defaulted. Every accepted request logs `mcp call session=… method=… tool=… remote=…`, every refusal `mcp refused reason=… remote=…`. The target's token follows the shim's precedence unchanged: `A2A_MCP_TOKEN`, else (local target only) the Keychain item `A2A_LOCAL_KEYCHAIN_SERVICE`/`A2A_LOCAL_KEYCHAIN_ACCOUNT`, else TeamVault key `A2A_MCP_TEAMVAULT_KEY` under `TEAMVAULT_CONFIG_PERSONAL`
+
 ## v0.20.0
 
 - feat: serve the cluster-side half of the A2A push tunnel on its own listener (`RELAY_LISTEN`, with `RELAY_SECRET`), so a worker in this cluster can report status to the supervisor that spawned it. The worker pushes to `/a2a/push` — the same path the `docker` arm uses, so a `k8s` worker's contract does not change, only the host it dials; the Mac long-polls `/relay/pull` and the relay holds what arrives in between. The relay does not verify the notification token — the supervisor that minted it does — and authenticates its pull side with the tunnel secret instead, in constant time. A full queue answers `503` so the SDK's sender retries rather than a status vanishing

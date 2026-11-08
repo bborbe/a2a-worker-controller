@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/bborbe/a2a-worker-controller/pkg"
+	"github.com/bborbe/a2a-worker-controller/pkg/a2amcp"
 	"github.com/bborbe/a2a-worker-controller/pkg/factory"
 	"github.com/bborbe/a2a-worker-controller/pkg/relay"
 )
@@ -31,33 +33,39 @@ func main() {
 }
 
 type application struct {
-	SentryDSN              string        `required:"true"  arg:"sentry-dsn"                 env:"SENTRY_DSN"            usage:"SentryDSN"                                                                                                                                                                     display:"length"`
-	SentryProxy            string        `required:"false" arg:"sentry-proxy"               env:"SENTRY_PROXY"          usage:"Sentry Proxy"`
-	Listen                 string        `required:"true"  arg:"listen"                     env:"LISTEN"                usage:"address to listen to"`
-	Backend                string        `required:"false" arg:"backend"                    env:"BACKEND"               usage:"backend serving workers"                                                                                                                                                                        default:"docker"`
-	WorkerImage            string        `required:"true"  arg:"worker-image"               env:"WORKER_IMAGE"          usage:"image every created worker container runs"`
-	A2APublicURL           string        `required:"true"  arg:"a2a-public-url"             env:"A2A_PUBLIC_URL"        usage:"externally reachable A2A endpoint the card advertises"`
-	A2AAgentName           string        `required:"false" arg:"a2a-agent-name"             env:"A2A_AGENT_NAME"        usage:"agent name the Agent Card advertises"                                                                                                                                                           default:"a2a-worker-controller"`
-	A2AAuthToken           string        `required:"true"  arg:"a2a-auth-token"             env:"A2A_AUTH_TOKEN"        usage:"bearer token every gated request must present"                                                                                                                                 display:"length"`
-	RelayListen            string        `required:"false" arg:"relay-listen"               env:"RELAY_LISTEN"          usage:"address the A2A push relay listens on (empty disables the relay)"`
-	RelaySecret            string        `required:"false" arg:"relay-secret"               env:"RELAY_SECRET"          usage:"secret the tunnel's pull side must present"                                                                                                                                    display:"length"`
-	Namespace              string        `required:"false" arg:"namespace"                  env:"NAMESPACE"             usage:"k8s backend: namespace every worker is created in"`
-	WorkerTemplate         string        `required:"false" arg:"worker-template"            env:"WORKER_TEMPLATE"       usage:"k8s backend: Config every worker is cloned from"                                                                                                                                                default:"claude-interactive"`
-	IngressDomain          string        `required:"false" arg:"ingress-domain"             env:"INGRESS_DOMAIN"        usage:"k8s backend: parent domain of every worker host"`
-	TLSSecretName          string        `required:"false" arg:"tls-secret-name"            env:"TLS_SECRET_NAME"       usage:"k8s backend: wildcard certificate Secret for the ingress domain"`
-	WorkerPriority         string        `required:"false" arg:"worker-priority-class"      env:"WORKER_PRIORITY_CLASS" usage:"k8s backend: PriorityClass every worker pod runs under (empty keeps the template's)"`
-	EgressAllow            string        `required:"false" arg:"egress-allow"               env:"EGRESS_ALLOW"          usage:"k8s backend: comma-separated destinations every worker may reach besides DNS, each namespace[/key=value]:port for an in-cluster pod or cidr=<CIDR>:port for an external range"`
-	MountAllow             string        `required:"false" arg:"mount-allow"                env:"MOUNT_ALLOW"           usage:"docker backend: comma-separated absolute host paths a caller may declare as mounts (empty allows none)"`
-	LocalVault             string        `required:"false" arg:"local-vault"                env:"LOCAL_VAULT"           usage:"local backend: vault root the workers' task files live in"`
-	LocalClaudeScript      string        `required:"false" arg:"local-claude-script"        env:"LOCAL_CLAUDE_SCRIPT"   usage:"local backend: vault claude_script launcher every worker tab runs"`
-	LocalWindowID          string        `required:"false" arg:"local-window-id"            env:"LOCAL_WINDOW_ID"       usage:"local backend: WezTerm window id a worker tab opens in when its role does not resolve one"`
-	LocalRoleMap           string        `required:"false" arg:"local-role-map"             env:"LOCAL_ROLE_MAP"        usage:"local backend: WezTerm role map a task's role is resolved against"`
-	LocalWezterm           string        `required:"false" arg:"local-wezterm"              env:"LOCAL_WEZTERM"         usage:"local backend: absolute path to the wezterm binary (defaults to the app bundle)"`
-	LocalStateFile         string        `required:"false" arg:"local-state-file"           env:"LOCAL_STATE_FILE"      usage:"local backend: JSON file the worker ownership store lives in (defaults under ~/.local/state)"`
-	A2ATaskStoreTTL        time.Duration `required:"false" arg:"a2a-task-store-ttl"         env:"A2A_TASK_STORE_TTL"    usage:"age past which a stored A2A task is dropped"                                                                                                                                                    default:"5m"`
-	A2ATaskStoreMaxEntries int           `required:"false" arg:"a2a-task-store-max-entries" env:"A2A_TASK_STORE_MAX"    usage:"hard cap on the number of stored A2A tasks"                                                                                                                                                     default:"500"`
-	BuildGitVersion        string        `required:"false" arg:"build-git-version"          env:"BUILD_GIT_VERSION"     usage:"Build Git version"                                                                                                                                                                              default:"dev"`
-	BuildGitCommit         string        `required:"false" arg:"build-git-commit"           env:"BUILD_GIT_COMMIT"      usage:"Build Git commit hash"                                                                                                                                                                          default:"none"`
+	SentryDSN              string        `required:"true"  arg:"sentry-dsn"                 env:"SENTRY_DSN"                 usage:"SentryDSN"                                                                                                                                                                     display:"length"`
+	SentryProxy            string        `required:"false" arg:"sentry-proxy"               env:"SENTRY_PROXY"               usage:"Sentry Proxy"`
+	Listen                 string        `required:"true"  arg:"listen"                     env:"LISTEN"                     usage:"address to listen to"`
+	Backend                string        `required:"false" arg:"backend"                    env:"BACKEND"                    usage:"backend serving workers"                                                                                                                                                                        default:"docker"`
+	WorkerImage            string        `required:"true"  arg:"worker-image"               env:"WORKER_IMAGE"               usage:"image every created worker container runs"`
+	A2APublicURL           string        `required:"true"  arg:"a2a-public-url"             env:"A2A_PUBLIC_URL"             usage:"externally reachable A2A endpoint the card advertises"`
+	A2AAgentName           string        `required:"false" arg:"a2a-agent-name"             env:"A2A_AGENT_NAME"             usage:"agent name the Agent Card advertises"                                                                                                                                                           default:"a2a-worker-controller"`
+	A2AAuthToken           string        `required:"true"  arg:"a2a-auth-token"             env:"A2A_AUTH_TOKEN"             usage:"bearer token every gated request must present"                                                                                                                                 display:"length"`
+	RelayListen            string        `required:"false" arg:"relay-listen"               env:"RELAY_LISTEN"               usage:"address the A2A push relay listens on (empty disables the relay)"`
+	RelaySecret            string        `required:"false" arg:"relay-secret"               env:"RELAY_SECRET"               usage:"secret the tunnel's pull side must present"                                                                                                                                    display:"length"`
+	Namespace              string        `required:"false" arg:"namespace"                  env:"NAMESPACE"                  usage:"k8s backend: namespace every worker is created in"`
+	WorkerTemplate         string        `required:"false" arg:"worker-template"            env:"WORKER_TEMPLATE"            usage:"k8s backend: Config every worker is cloned from"                                                                                                                                                default:"claude-interactive"`
+	IngressDomain          string        `required:"false" arg:"ingress-domain"             env:"INGRESS_DOMAIN"             usage:"k8s backend: parent domain of every worker host"`
+	TLSSecretName          string        `required:"false" arg:"tls-secret-name"            env:"TLS_SECRET_NAME"            usage:"k8s backend: wildcard certificate Secret for the ingress domain"`
+	WorkerPriority         string        `required:"false" arg:"worker-priority-class"      env:"WORKER_PRIORITY_CLASS"      usage:"k8s backend: PriorityClass every worker pod runs under (empty keeps the template's)"`
+	EgressAllow            string        `required:"false" arg:"egress-allow"               env:"EGRESS_ALLOW"               usage:"k8s backend: comma-separated destinations every worker may reach besides DNS, each namespace[/key=value]:port for an in-cluster pod or cidr=<CIDR>:port for an external range"`
+	MountAllow             string        `required:"false" arg:"mount-allow"                env:"MOUNT_ALLOW"                usage:"docker backend: comma-separated absolute host paths a caller may declare as mounts (empty allows none)"`
+	LocalVault             string        `required:"false" arg:"local-vault"                env:"LOCAL_VAULT"                usage:"local backend: vault root the workers' task files live in"`
+	LocalClaudeScript      string        `required:"false" arg:"local-claude-script"        env:"LOCAL_CLAUDE_SCRIPT"        usage:"local backend: vault claude_script launcher every worker tab runs"`
+	LocalWindowID          string        `required:"false" arg:"local-window-id"            env:"LOCAL_WINDOW_ID"            usage:"local backend: WezTerm window id a worker tab opens in when its role does not resolve one"`
+	LocalRoleMap           string        `required:"false" arg:"local-role-map"             env:"LOCAL_ROLE_MAP"             usage:"local backend: WezTerm role map a task's role is resolved against"`
+	LocalWezterm           string        `required:"false" arg:"local-wezterm"              env:"LOCAL_WEZTERM"              usage:"local backend: absolute path to the wezterm binary (defaults to the app bundle)"`
+	LocalStateFile         string        `required:"false" arg:"local-state-file"           env:"LOCAL_STATE_FILE"           usage:"local backend: JSON file the worker ownership store lives in (defaults under ~/.local/state)"`
+	A2ATaskStoreTTL        time.Duration `required:"false" arg:"a2a-task-store-ttl"         env:"A2A_TASK_STORE_TTL"         usage:"age past which a stored A2A task is dropped"                                                                                                                                                    default:"5m"`
+	A2ATaskStoreMaxEntries int           `required:"false" arg:"a2a-task-store-max-entries" env:"A2A_TASK_STORE_MAX"         usage:"hard cap on the number of stored A2A tasks"                                                                                                                                                     default:"500"`
+	A2AMCPTargetURL        string        `required:"false" arg:"a2a-mcp-target-url"         env:"A2A_MCP_TARGET_URL"         usage:"agent the /mcp a2a tools reach (empty disables /mcp)"                                                                                                                                           default:"http://localhost:9091"`
+	A2AMCPToken            string        `required:"false" arg:"a2a-mcp-token"              env:"A2A_MCP_TOKEN"              usage:"/mcp: explicit bearer token for the target (wins over Keychain and TeamVault)"                                                                                                 display:"length"`
+	A2AMCPKeychainService  string        `required:"false" arg:"a2a-mcp-keychain-service"   env:"A2A_LOCAL_KEYCHAIN_SERVICE" usage:"/mcp: Keychain service holding a local target's token"                                                                                                                                          default:"agent-claude-local"`
+	A2AMCPKeychainAccount  string        `required:"false" arg:"a2a-mcp-keychain-account"   env:"A2A_LOCAL_KEYCHAIN_ACCOUNT" usage:"/mcp: Keychain account holding a local target's token"                                                                                                                                          default:"a2a-token"`
+	A2AMCPTeamVaultKey     string        `required:"false" arg:"a2a-mcp-teamvault-key"      env:"A2A_MCP_TEAMVAULT_KEY"      usage:"/mcp: TeamVault key of the target's token (last fallback)"`
+	A2AMCPTeamVaultConfig  string        `required:"false" arg:"a2a-mcp-teamvault-config"   env:"TEAMVAULT_CONFIG_PERSONAL"  usage:"/mcp: TeamVault config for the token lookup (defaults to ~/.config/teamvault-cli/config.json)"`
+	BuildGitVersion        string        `required:"false" arg:"build-git-version"          env:"BUILD_GIT_VERSION"          usage:"Build Git version"                                                                                                                                                                              default:"dev"`
+	BuildGitCommit         string        `required:"false" arg:"build-git-commit"           env:"BUILD_GIT_COMMIT"           usage:"Build Git commit hash"                                                                                                                                                                          default:"none"`
 }
 
 func (a *application) Run(ctx context.Context, sentryClient libsentry.Client) error {
@@ -154,6 +162,11 @@ func (a *application) createHTTPServer() run.Func {
 				PublicURL: a.A2APublicURL,
 			})))
 		router.Path(pkg.A2APath).Handler(pkg.NewA2AHandler(executor, taskStore))
+		if a.A2AMCPTargetURL != "" {
+			// Exempt from the bearer gate below and gated by the handler itself — loopback
+			// callers naming their session only. See pkg/a2amcp.
+			router.Path(a2amcp.Path).Handler(a.createA2AMCPHandler())
+		}
 
 		// The gate wraps the whole router, so /a2a and every route registered after this
 		// point are covered by construction rather than by remembering to add it. It is
@@ -165,6 +178,32 @@ func (a *application) createHTTPServer() run.Func {
 			pkg.NewAuthToken(a.A2AAuthToken).Wrap(router),
 		).Run(ctx)
 	}
+}
+
+// createA2AMCPHandler wires the /mcp a2a tools: an A2A client for the configured target,
+// whose token follows the stdio shim's precedence — explicit value, else (local target only)
+// the Keychain item, else the TeamVault key.
+func (a *application) createA2AMCPHandler() http.Handler {
+	teamVaultConfig := a.A2AMCPTeamVaultConfig
+	if teamVaultConfig == "" {
+		teamVaultConfig = pkg.DefaultTeamVaultConfigPath()
+	}
+	tokens := a2amcp.NewTokenSource(
+		a2amcp.TokenConfig{
+			Token:           a.A2AMCPToken,
+			TargetURL:       a.A2AMCPTargetURL,
+			KeychainService: a.A2AMCPKeychainService,
+			KeychainAccount: a.A2AMCPKeychainAccount,
+			TeamVaultKey:    a.A2AMCPTeamVaultKey,
+		},
+		a2amcp.NewKeychainReader(),
+		pkg.NewTeamVaultResolverWithConfig(teamVaultConfig),
+	)
+	return a2amcp.NewHandler(a2amcp.NewClient(
+		&http.Client{Timeout: a2amcp.DefaultTimeout},
+		a.A2AMCPTargetURL,
+		tokens,
+	))
 }
 
 // createRelayServer serves the cluster-side half of the A2A push tunnel on its own listener.
