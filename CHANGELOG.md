@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: add `pkg/a2amcp.LoadOrCreateBearer`, the local bearer the upcoming `/mcp` route will require. A loopback check cannot authenticate that route: measured on OrbStack, a container calling `host.docker.internal` arrives with a loopback peer *and* local address and sends whatever `Host` it likes, so a docker worker would pass it. The bearer is 32 random bytes, hex-encoded, created on first use at `~/.local/state/a2a-worker-controller/mcp-bearer` (directory `0700`, file `0600`) and reused thereafter, so a controller restart does not cut off connected sessions. A file readable by group or others is refused, as is an empty one; the value never appears in an error. Nothing is wired yet
+
 ## v0.20.1
 
 - chore: restate the do-not-merge contract in the gate workflow

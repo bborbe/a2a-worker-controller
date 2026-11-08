@@ -41,6 +41,9 @@ const (
 	// localStateDir is the ownership store's directory under the home directory. The store is
 	// state, not configuration, so it lives where the XDG layout puts state.
 	localStateDir = ".local/state/a2a-worker-controller"
+	// LocalStateDir is the controller's state directory relative to the home directory,
+	// exported so a sibling package keeps its own state beside the backend's.
+	LocalStateDir = localStateDir
 	// localStateFileName is the ownership store's file name.
 	localStateFileName = "local-workers.json"
 	// localTabNamePrefix marks a tab as a controller worker, so a supervised tab is
