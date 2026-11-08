@@ -26,6 +26,7 @@ var _ = Describe("Client", func() {
 		sendStatus int
 		sendBody   map[string]any
 		gotAuth    string
+		gotVersion string
 		gotRequest *sentRequest
 	)
 
@@ -34,6 +35,7 @@ var _ = Describe("Client", func() {
 		tokens = &mocks.A2amcpTokenSource{}
 		tokens.TokenReturns("secret-token", nil)
 		gotAuth = ""
+		gotVersion = ""
 		gotRequest = nil
 		sendStatus = http.StatusOK
 		sendBody = map[string]any{
@@ -59,6 +61,7 @@ var _ = Describe("Client", func() {
 		})
 		mux.HandleFunc("/a2a", func(w http.ResponseWriter, r *http.Request) {
 			gotAuth = r.Header.Get("Authorization")
+			gotVersion = r.Header.Get(a2amcp.A2AVersionHeader)
 			gotRequest = &sentRequest{}
 			_ = json.NewDecoder(r.Body).Decode(gotRequest)
 			w.WriteHeader(sendStatus)
@@ -88,6 +91,7 @@ var _ = Describe("Client", func() {
 		result, err := newClient().Send(ctx, "ping", "c1")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(gotAuth).To(Equal("Bearer secret-token"))
+		Expect(gotVersion).To(Equal(a2amcp.A2AProtocolVersion))
 		Expect(gotRequest).NotTo(BeNil())
 		Expect(gotRequest.Method).To(Equal("SendMessage"))
 		message := gotRequest.Params.Message
