@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.21.0
 
 - feat: add `pkg/a2amcp.TokenSource`, the token resolution the upcoming `/mcp` A2A client presents to its target, carrying the stdio shim wrapper's precedence unchanged — an explicit token, else (only for a `localhost`/`127.0.0.1` target) the macOS Keychain item, else a TeamVault key. A failed Keychain lookup falls through rather than failing, as the wrapper's `|| true` did; only every branch coming up empty is an error. It resolves on every call, so a rotated token needs no restart. `NewTeamVaultResolverWithConfig` lets it resolve against an explicit TeamVault config (the operator's personal instance) rather than the controller's own `TEAMVAULT_CONFIG`. Nothing is wired yet — the route lands in the follow-up
 
