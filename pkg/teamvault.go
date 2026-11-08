@@ -57,9 +57,19 @@ type teamVaultCLI struct {
 // teamvault-cli's own default — passing no flag at all, rather than guessing a path here. That
 // keeps one precedence rule in the system instead of two that can disagree.
 func NewTeamVaultResolver() TeamVaultResolver {
+	return NewTeamVaultResolverWithConfig(os.Getenv(TeamVaultConfigEnv))
+}
+
+// NewTeamVaultResolverWithConfig creates the resolver that shells out to teamvault-cli against
+// an explicit config path. An empty path passes no flag, leaving teamvault-cli's own default.
+//
+// It exists for a caller whose TeamVault instance is not the controller's own: the /mcp A2A
+// client resolves its token from the operator's personal instance, the same config the stdio
+// shim it replaces reads.
+func NewTeamVaultResolverWithConfig(config string) TeamVaultResolver {
 	return &teamVaultCLI{
 		command: TeamVaultCommand,
-		config:  os.Getenv(TeamVaultConfigEnv),
+		config:  config,
 		run:     runTeamVaultCLI,
 	}
 }
