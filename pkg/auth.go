@@ -34,6 +34,11 @@ const (
 // canonical admin endpoints, reached through the gateway's human-only mount rather than by an
 // agent. None of the five grants a control operation and none reveals a credential.
 //
+// /mcp is exempt from the BEARER gate only — it is not unauthenticated. It serves the `a2a`
+// MCP tools to every local Claude Code session, none of which holds this controller's token,
+// and gates itself instead: loopback peer and local address, loopback Host and Origin, and a
+// non-empty X-Claude-Code-Session-Id (see pkg/a2amcp). A non-local caller is refused there.
+//
 // The A2A Agent Card is deliberately NOT exempt. The reference gate in
 // github.com/bborbe/agent/interactive exempts it as public discovery, but every caller of
 // this controller already holds the token, so gating the card costs a caller nothing and
@@ -44,6 +49,8 @@ const (
 	metricsPath           = "/metrics"
 	setLogLevelPathPrefix = "/setloglevel/"
 	gcPath                = "/gc"
+	// MCPPath is the route the a2a MCP endpoint is served at; see the exemption note above.
+	MCPPath = "/mcp"
 )
 
 // unauthorizedErrorCode is the code the gate's 401 body carries.
@@ -108,7 +115,7 @@ func (a Auth) allows(header string) bool {
 // nothing and the endpoint would be gated while its callers believe it is not.
 func authExempt(path string) bool {
 	switch path {
-	case healthzPath, readinessPath, metricsPath, gcPath:
+	case healthzPath, readinessPath, metricsPath, gcPath, MCPPath:
 		return true
 	default:
 		return strings.HasPrefix(path, setLogLevelPathPrefix)

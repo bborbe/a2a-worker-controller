@@ -73,9 +73,13 @@ func LoadOrCreateBearer(ctx context.Context, path string) (string, error) {
 	}
 	if _, err := file.WriteString(secret + "\n"); err != nil {
 		_ = file.Close()
+		// A partially written file must not survive: it would be read as the bearer on the
+		// next start, refusing every caller for a reason nothing on disk explains.
+		_ = os.Remove(path)
 		return "", errors.Wrapf(ctx, err, "write bearer file %s failed", path)
 	}
 	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
 		return "", errors.Wrapf(ctx, err, "close bearer file %s failed", path)
 	}
 	return secret, nil

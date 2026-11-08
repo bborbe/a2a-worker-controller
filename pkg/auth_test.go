@@ -126,6 +126,8 @@ var _ = Describe("Auth", func() {
 			Entry("metrics", "/metrics"),
 			Entry("gc", "/gc"),
 			Entry("setloglevel", "/setloglevel/debug"),
+			// /mcp gates itself (loopback + session header); see pkg/a2amcp.
+			Entry("mcp", pkg.MCPPath),
 		)
 	})
 
