@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: add `pkg/a2amcp.LoadOrCreateBearer`, the local bearer the upcoming `/mcp` route will require. A loopback check cannot authenticate that route: measured on OrbStack, a container calling `host.docker.internal` arrives with a loopback peer *and* local address and sends whatever `Host` it likes, so a docker worker would pass it. The bearer is 32 random bytes, hex-encoded, created on first use at `~/.local/state/a2a-worker-controller/mcp-bearer` (directory `0700`, file `0600`) and reused thereafter, so a controller restart does not cut off connected sessions. A file readable by group or others is refused, as is an empty one; the value never appears in an error. Nothing is wired yet
+
 ## v0.21.0
 
 - feat: add `pkg/a2amcp.TokenSource`, the token resolution the upcoming `/mcp` A2A client presents to its target, carrying the stdio shim wrapper's precedence unchanged — an explicit token, else (only for a `localhost`/`127.0.0.1` target) the macOS Keychain item, else a TeamVault key. A failed Keychain lookup falls through rather than failing, as the wrapper's `|| true` did; only every branch coming up empty is an error. It resolves on every call, so a rotated token needs no restart. `NewTeamVaultResolverWithConfig` lets it resolve against an explicit TeamVault config (the operator's personal instance) rather than the controller's own `TEAMVAULT_CONFIG`. Nothing is wired yet — the route lands in the follow-up
