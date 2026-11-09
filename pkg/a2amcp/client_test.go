@@ -91,7 +91,9 @@ var _ = Describe("Client", func() {
 		result, err := newClient().Send(ctx, "ping", "c1")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(gotAuth).To(Equal("Bearer secret-token"))
-		Expect(gotVersion).To(Equal(a2amcp.A2AProtocolVersion))
+		// The literal wire value, not the constant: comparing against the constant would pass
+		// even if the constant were wrong, which is exactly the defect this header fixes.
+		Expect(gotVersion).To(Equal("1.0"))
 		Expect(gotRequest).NotTo(BeNil())
 		Expect(gotRequest.Method).To(Equal("SendMessage"))
 		message := gotRequest.Params.Message
