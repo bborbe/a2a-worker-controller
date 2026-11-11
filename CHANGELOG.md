@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- fix: **a call with no `X-Claude-Code-Session-Id` header is served instead of refused, so a client that omits it keeps its `a2a` tools.** The handler required the header before dispatch and answered HTTP 400 otherwise, which failed the whole MCP handshake: `initialize` and `tools/list` were refused and the client registered no tools at all. The header is attribution, not authentication — the bearer gate above it is what separates a caller from a session — so it is now read when present and never required. `ReasonMissingSessionHeader` and `ReasonEmptySessionHeader` are removed with the refusals they named. Change set: `pkg/a2amcp/handler.go`, `pkg/a2amcp/handler_test.go`, `CHANGELOG.md`.
+
 ## v0.24.1
 
 - chore: update Go to 1.27.4 and github.com/a2aproject/a2a-go/v2 to v2.8.0, github.com/bborbe/agent-task-executor to v0.60.0, github.com/bborbe/http to v1.26.33, github.com/bborbe/log to v1.7.8, github.com/bborbe/metrics to v0.6.11, github.com/bborbe/run to v1.11.11, github.com/bborbe/service to v1.11.3, github.com/bborbe/time to v1.27.28, github.com/bborbe/vault-cli to v0.192.1, k8s.io/api to v0.38.0-beta.0, k8s.io/apimachinery to v0.38.0-beta.0, k8s.io/client-go to v0.38.0-beta.0

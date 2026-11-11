@@ -98,7 +98,7 @@ var _ = Describe("Handler", func() {
 
 		It("answers refusals in the controller's structured error shape", func() {
 			req := newRequest(listTools)
-			req.Header.Del(a2amcp.SessionHeader)
+			req.Header.Del("Authorization")
 			handler.ServeHTTP(resp, req)
 			var body struct {
 				Error struct {
@@ -107,8 +107,8 @@ var _ = Describe("Handler", func() {
 				} `json:"error"`
 			}
 			Expect(json.Unmarshal(resp.Body.Bytes(), &body)).To(Succeed())
-			Expect(body.Error.Code).To(Equal(a2amcp.ReasonMissingSessionHeader))
-			Expect(body.Error.Message).To(ContainSubstring(a2amcp.SessionHeader))
+			Expect(body.Error.Code).To(Equal(a2amcp.ReasonMissingBearer))
+			Expect(body.Error.Message).To(ContainSubstring("Bearer"))
 		})
 
 		It("refuses a connection that arrived on a non-loopback local address with 403", func() {
@@ -135,21 +135,22 @@ var _ = Describe("Handler", func() {
 			Expect(resp.Header().Get("Allow")).To(Equal("POST, DELETE"))
 		})
 
-		It("refuses an absent session header with 400", func() {
-			req := newRequest(listTools)
-			req.Header.Del(a2amcp.SessionHeader)
-			handler.ServeHTTP(resp, req)
-			Expect(resp.Code).To(Equal(http.StatusBadRequest))
-			Expect(resp.Body.String()).To(ContainSubstring(a2amcp.ReasonMissingSessionHeader))
-			Expect(resp.Body.String()).To(ContainSubstring(a2amcp.SessionHeader))
-		})
+		It(
+			"serves a call with no session header, so the handshake still registers the tools",
+			func() {
+				req := newRequest(listTools)
+				req.Header.Del(a2amcp.SessionHeader)
+				handler.ServeHTTP(resp, req)
+				Expect(resp.Code).To(Equal(http.StatusOK))
+				Expect(resp.Body.String()).To(ContainSubstring(a2amcp.ToolAgentCard))
+			},
+		)
 
-		It("refuses an empty session header with 400", func() {
+		It("serves a call whose session header is blank", func() {
 			req := newRequest(listTools)
 			req.Header.Set(a2amcp.SessionHeader, "  ")
 			handler.ServeHTTP(resp, req)
-			Expect(resp.Code).To(Equal(http.StatusBadRequest))
-			Expect(resp.Body.String()).To(ContainSubstring(a2amcp.ReasonEmptySessionHeader))
+			Expect(resp.Code).To(Equal(http.StatusOK))
 		})
 
 		It("refuses a non-loopback peer with 403 even with a session header", func() {
