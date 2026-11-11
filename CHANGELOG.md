@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.25.0
 
 - fix: **a call with no `X-Claude-Code-Session-Id` header is served instead of refused, so a client that omits it keeps its `a2a` tools.** The handler required the header before dispatch and answered HTTP 400 otherwise, which failed the whole MCP handshake: `initialize` and `tools/list` were refused and the client registered no tools at all. The header is attribution, not authentication — the bearer gate above it is what separates a caller from a session — so it is now read when present and never required. `ReasonMissingSessionHeader` and `ReasonEmptySessionHeader` are removed with the refusals they named. Change set: `pkg/a2amcp/handler.go`, `pkg/a2amcp/handler_test.go`, `CHANGELOG.md`.
 
