@@ -32,12 +32,10 @@ const SessionHeader = "X-Claude-Code-Session-Id"
 
 // The refusal reasons a log line and a 4xx body carry.
 const (
-	ReasonMissingBearer        = "missing_bearer"
-	ReasonInvalidBearer        = "invalid_bearer"
-	ReasonMissingSessionHeader = "missing_session_header"
-	ReasonEmptySessionHeader   = "empty_session_header"
-	ReasonNonLoopback          = "non_loopback"
-	ReasonOriginNotAllowed     = "origin_not_allowed"
+	ReasonMissingBearer    = "missing_bearer"
+	ReasonInvalidBearer    = "invalid_bearer"
+	ReasonNonLoopback      = "non_loopback"
+	ReasonOriginNotAllowed = "origin_not_allowed"
 )
 
 // mcpProtocolVersion is offered when the client names none.
@@ -91,30 +89,12 @@ func (h *handler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 			"the a2a MCP endpoint requires the local bearer (Authorization: Bearer …)")
 		return
 	}
-	values := req.Header.Values(SessionHeader)
-	if len(values) == 0 {
-		refuse(
-			ctx,
-			resp,
-			http.StatusBadRequest,
-			ReasonMissingSessionHeader,
-			remote,
-			"missing "+SessionHeader+" header — a call is attributed to its session, so it is refused rather than defaulted",
-		)
-		return
-	}
-	sessionID := strings.TrimSpace(values[0])
-	if sessionID == "" {
-		refuse(
-			ctx,
-			resp,
-			http.StatusBadRequest,
-			ReasonEmptySessionHeader,
-			remote,
-			"empty "+SessionHeader+" header — a call is attributed to its session, so it is refused rather than defaulted",
-		)
-		return
-	}
+	// The session id is ATTRIBUTION, not authentication: the bearer above is what
+	// separates a caller from a session. It is therefore read when present and
+	// never required here. Requiring it refused the whole MCP handshake, which cost
+	// the caller every tool on this face — `tools/list` included, and that one needs
+	// no session at all.
+	sessionID := strings.TrimSpace(req.Header.Get(SessionHeader))
 	switch req.Method {
 	case http.MethodPost:
 		if !isJSONRequest(req) {
