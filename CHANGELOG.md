@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- chore: update Go to 1.27.4 and github.com/a2aproject/a2a-go/v2 to v2.8.0, github.com/bborbe/agent-task-executor to v0.60.0, github.com/bborbe/http to v1.26.33, github.com/bborbe/log to v1.7.8, github.com/bborbe/metrics to v0.6.11, github.com/bborbe/run to v1.11.11, github.com/bborbe/service to v1.11.3, github.com/bborbe/time to v1.27.28, github.com/bborbe/vault-cli to v0.192.1, k8s.io/api to v0.38.0-beta.0, k8s.io/apimachinery to v0.38.0-beta.0, k8s.io/client-go to v0.38.0-beta.0
+
 ## v0.24.0
 
 - feat: `make build` resolves `BUILD_TARGET` from a bounded sun probe - sun when reachable, local docker as the fallback. An explicit `BUILD_TARGET` always wins, and the decision prints at parse time so it is visible under `make -n`
