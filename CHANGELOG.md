@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+- feat: `make build` resolves `BUILD_TARGET` from a bounded sun probe - sun when reachable, local docker as the fallback. An explicit `BUILD_TARGET` always wins, and the decision prints at parse time so it is visible under `make -n`
+
 ## v0.23.1
 
 - fix: send `A2A-Version: 1.0` on the `/mcp` client's `SendMessage` call. a2a-go v2 serves 1.0 only, and a request without the header is read as 0.3 and refused with `VERSION_NOT_SUPPORTED` (`requested "0.3", served "1.0"`). Measured 2026-11-08 against `bborbe/agent-claude:local-scratch`: the identical request fails without the header and returns the agent's reply with it. The stdio shim sends no version header, so `a2a_send` was already broken against every 1.0 worker — this client must not inherit that, and the move is what makes the fix possible
