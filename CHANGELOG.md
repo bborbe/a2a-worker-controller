@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 Please choose versions by [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## v0.25.2
 
 - chore: update github.com/a2aproject/a2a-go/v2 to v2.9.0, github.com/bborbe/agent-task-executor to v0.71.2, github.com/bborbe/errors to v1.7.1, github.com/bborbe/http to v1.28.1, github.com/bborbe/log to v1.7.10, github.com/bborbe/metrics to v0.6.15, github.com/bborbe/run to v1.13.0, github.com/bborbe/sentry to v1.11.1, github.com/bborbe/service to v1.12.2, github.com/bborbe/time to v1.27.30, github.com/bborbe/vault-cli to v0.200.6
 
